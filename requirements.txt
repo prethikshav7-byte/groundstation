@@ -1,0 +1,30 @@
+# Ground Station — runtime dependencies
+#
+# Install:   pip install -r requirements.txt
+#
+# Python 3.10+ required. The code uses `X | None` unions and `match`-free
+# modern syntax; 3.12 is what it was developed against.
+
+PyQt6>=6.6,<7.0
+pyqtgraph>=0.13.3
+pyserial>=3.5
+
+# ── Notes ────────────────────────────────────────────────────────────────
+#
+# pyqtgraph is NOT optional despite being a plotting library: §7's graph
+# engine, §11.10's profile plot and §8's axis clamping are all built on
+# it. There is no fallback renderer.
+#
+# pyserial is only needed for LIVE mode. Simulator mode (§2.1) opens no
+# port and imports it lazily, so `python3 main.py --sim` works without it.
+#
+# numpy is pulled in by pyqtgraph and is not listed separately — pinning
+# it here would risk fighting pyqtgraph's own constraint.
+#
+# NOTHING below ground_station/link.py needs any of these. The parser,
+# codec, timeline, reconciliation, decimation, command guards, experiment
+# parser and simulator engine are all pure-stdlib, which is why all four
+# test suites run with no dependencies at all:
+#
+#     python3 test_phase1.py && python3 test_phase2.py
+#     python3 test_phase3.py && python3 test_phase4.py
