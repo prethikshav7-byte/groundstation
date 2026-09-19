@@ -43,6 +43,11 @@ class VehicleID(Enum):
     CANSAT = "CANSAT"
 
 
+class RocketSafetyState(Enum):
+    UNARMED = "UNARMED"
+    ARMED = "ARMED"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  §5.1 — eight states, same set for both vehicles
 # ─────────────────────────────────────────────────────────────────────────────
@@ -110,7 +115,7 @@ class TelemetryPacket:
     or feed it to a command decision.
     """
     # 1–5 identity and timing
-    team_id: int
+    team_id: Any
     vehicle_id: VehicleID
     mission_time: float          # s, monotonic
     packet_count: int            # per-vehicle, never reset (§4.1 field 4)
@@ -130,12 +135,21 @@ class TelemetryPacket:
     gnss_satellites: int
 
     # 15–20 IMU
-    accel_x: float               # g
-    accel_y: float
-    accel_z: float
-    gyro_x: float                # deg/s
-    gyro_y: float
-    gyro_z: float
+    accel_x: float = 0.0         # g (PENDING)
+    accel_y: float = 0.0
+    accel_z: float = 0.0
+    gyro_x: float = 0.0          # deg/s
+    gyro_y: float = 0.0
+    gyro_z: float = 0.0
+    gyro_spin_rate: float = 0.0
+    accelerometer: Optional[float] = None
+
+    # Live rocket telemetry fields
+    flight_state_code: int = 0
+    velocity: Optional[float] = None
+    vehicle_code: int = 1
+    raw_accelerometer: Optional[str] = None  # PENDING
+    checksum: str = ""
 
     # ── metadata attached on the ground, not measured by the vehicle ──────
     #: Fields beyond 21, e.g. receiver-appended RSSI/SNR (§3.4, §4.7).
@@ -145,16 +159,60 @@ class TelemetryPacket:
     #: The verbatim line, so the log can record exactly what arrived (§12.1).
     raw: str = ""
 
-    # ── convenience accessors for the receiver-appended link fields ───────
+    # ── convenience accessors ─────────────────────────────────────────────
+    @property
+    def timestamp(self) -> float:
+        return self.mission_time
+
+    @property
+    def flight_state(self) -> str:
+        return self.state.value
+
+    @property
+    def voltage(self) -> float:
+        return self.battery_voltage
+
+    @property
+    def vehicle(self) -> str:
+        return self.vehicle_id.value
+
+    @property
+    def latitude(self) -> float:
+        return self.gnss_latitude
+
+    @property
+    def longitude(self) -> float:
+        return self.gnss_longitude
+
+    @property
+    def satellites(self) -> int:
+        return self.gnss_satellites
+
     @property
     def rssi(self) -> Optional[float]:
         """Per-vehicle RSSI in dBm if the receiver appended it (§3.4)."""
-        return _maybe_float(self.extras.get("RSSI"))
+        return _maybe_float(self.extras.get("RSSI") or self.extras.get("rssi"))
 
     @property
     def snr(self) -> Optional[float]:
         """Per-vehicle SNR in dB if the receiver appended it (§3.4)."""
-        return _maybe_float(self.extras.get("SNR"))
+        return _maybe_float(self.extras.get("SNR") or self.extras.get("snr"))
+
+    @property
+    def gnss_fix(self) -> int:
+        fix_str = self.extras.get("FIX") or self.extras.get("gnss_fix")
+        if fix_str is not None:
+            try:
+                return int(float(fix_str))
+            except ValueError:
+                pass
+        return 1 if self.gnss_satellites >= 6 else 0
+
+    @property
+    def is_simulation(self) -> bool:
+        """True if packet carries SIM=1 simulation telemetry flag."""
+        sim_str = self.extras.get("SIM") or self.extras.get("sim")
+        return sim_str == "1"
 
 
 def _maybe_float(v: Optional[str]) -> Optional[float]:

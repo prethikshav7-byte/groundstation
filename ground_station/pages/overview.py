@@ -97,7 +97,7 @@ class OverviewPage(QWidget):
             ("temperature", axspec.TEMPERATURE, None),
             ("acceleration", axspec.ACCELERATION, xyz),
             ("pressure", axspec.PRESSURE, None),
-            ("orientation", axspec.ORIENTATION, xyz),
+            ("orientation", axspec.ORIENTATION, None),
         ]
         for i, (key, spec, traces) in enumerate(specs):
             g = TelemetryGraph(key, spec=spec, traces=traces)
@@ -135,19 +135,23 @@ class OverviewPage(QWidget):
         g = self.graphs[packet.vehicle_id]
         t = packet.mission_time
         tier, state = result.tier, packet.state
+        v_final = packet.velocity if packet.velocity is not None else derived_velocity
 
         g["altitude"].add_point(t, packet.altitude, tier=tier, state=state,
-                                v_entry=derived_velocity)
+                                v_entry=v_final)
         g["temperature"].add_point(t, packet.temperature, tier=tier, state=state)
         g["pressure"].add_point(t, packet.pressure, tier=tier, state=state)
-        for axis, val in (("X", packet.accel_x), ("Y", packet.accel_y),
-                          ("Z", packet.accel_z)):
-            g["acceleration"].add_point(t, val, trace=axis, tier=tier, state=state)
-        for axis, val in (("X", packet.gyro_x), ("Y", packet.gyro_y),
-                          ("Z", packet.gyro_z)):
-            g["orientation"].add_point(t, val, trace=axis, tier=tier, state=state)
-        if derived_velocity is not None:
-            g["velocity"].add_point(t, derived_velocity, tier=tier, state=state)
+        accel_val = packet.accelerometer
+        if accel_val is not None:
+            g["acceleration"].add_point(t, accel_val, tier=tier, state=state)
+        elif packet.accel_x != 0.0 or packet.accel_y != 0.0 or packet.accel_z != 0.0:
+            for axis, val in (("X", packet.accel_x), ("Y", packet.accel_y),
+                              ("Z", packet.accel_z)):
+                g["acceleration"].add_point(t, val, trace=axis, tier=tier, state=state)
+        spin_rate = packet.gyro_spin_rate if packet.gyro_spin_rate != 0.0 else packet.gyro_z
+        g["orientation"].add_point(t, spin_rate, tier=tier, state=state)
+        if v_final is not None:
+            g["velocity"].add_point(t, v_final, tier=tier, state=state)
 
     def clear_graphs(self) -> None:
         for graph in self.all_graphs():

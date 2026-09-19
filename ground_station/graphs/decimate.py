@@ -107,9 +107,20 @@ class RingBuffer:
         self._x: List[float] = []
         self._y: List[float] = []
 
-    def append(self, x: float, y: float) -> None:
-        self._x.append(x)
-        self._y.append(y)
+    def append(self, x: float, y: float) -> bool:
+        """Append one sample.
+
+        Maintains sorted order in _x so window() binary search remains correct
+        without destroying existing graph history.
+        """
+        reset = False
+        if self._x and x < self._x[-1]:
+            idx = _bisect_right(self._x, x)
+            self._x.insert(idx, x)
+            self._y.insert(idx, y)
+        else:
+            self._x.append(x)
+            self._y.append(y)
         if len(self._x) > self.capacity:
             # Trim in blocks rather than one element at a time: popping
             # from the front of a list is O(n), so per-sample trimming at
@@ -118,6 +129,7 @@ class RingBuffer:
             drop = self.capacity // 10
             del self._x[:drop]
             del self._y[:drop]
+        return reset
 
     def clear(self) -> None:
         self._x.clear()

@@ -29,7 +29,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Tuple
 
-from .models import FlightState, GROUND_STATES, VehicleID, VehicleLinkState
+from .models import (
+    FlightState, GROUND_STATES, RocketSafetyState, VehicleID, VehicleLinkState,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -103,6 +105,45 @@ COMMANDS: Dict[str, CommandSpec] = {
         CommandSpec("CALIBRATE_ALL",
                     "Run all calibrations in sequence",
                     Guard.GROUND_ONLY),
+        # Multi-test servo bench commands
+        CommandSpec("TEST1",
+                    "Individual door servo test (lock 0° -> actuate 60°)",
+                    Guard.NONE, rocket_only=True),
+        CommandSpec("TEST2",
+                    "Individual CanSat deploy servo test (lock 0° -> actuate 60°)",
+                    Guard.NONE, rocket_only=True),
+        CommandSpec("TEST3",
+                    "Individual separation servo test (lock 0° -> actuate 60°)",
+                    Guard.NONE, rocket_only=True),
+        CommandSpec("TEST4",
+                    "Lock all servos to safe position (0°)",
+                    Guard.NONE, rocket_only=True),
+        CommandSpec("TEST5",
+                    "Start manual sequence (Step 1: Door)",
+                    Guard.NONE, rocket_only=True),
+        CommandSpec("NEXT",
+                    "Advance manual sequence to next step",
+                    Guard.NONE, rocket_only=True),
+        CommandSpec("TEST6",
+                    "Full automatic 3-servo sequence",
+                    Guard.NONE, rocket_only=True),
+        CommandSpec("RESET",
+                    "Reset and lock all servos (0°)",
+                    Guard.NONE, rocket_only=True),
+        # Hardware servo angle and lock commands
+        CommandSpec("DOOR:30", "Set Rocket Door angle to 30°", Guard.NONE, rocket_only=True),
+        CommandSpec("DOOR:60", "Set Rocket Door angle to 60°", Guard.NONE, rocket_only=True),
+        CommandSpec("DOOR:90", "Set Rocket Door angle to 90°", Guard.NONE, rocket_only=True),
+        CommandSpec("LOCK:DOOR", "Lock Rocket Door (0° safe position)", Guard.NONE, rocket_only=True),
+        CommandSpec("CANSAT:30", "Set CanSat deployment angle to 30°", Guard.NONE, rocket_only=True),
+        CommandSpec("CANSAT:60", "Set CanSat deployment angle to 60°", Guard.NONE, rocket_only=True),
+        CommandSpec("CANSAT:90", "Set CanSat deployment angle to 90°", Guard.NONE, rocket_only=True),
+        CommandSpec("LOCK:CANSAT", "Lock CanSat deployment (0° safe position)", Guard.NONE, rocket_only=True),
+        CommandSpec("SEPARATION:30", "Set Separation angle to 30°", Guard.NONE, rocket_only=True),
+        CommandSpec("SEPARATION:60", "Set Separation angle to 60°", Guard.NONE, rocket_only=True),
+        CommandSpec("SEPARATION:90", "Set Separation angle to 90°", Guard.NONE, rocket_only=True),
+        CommandSpec("LOCK:SEPARATION", "Lock Separation (0° safe position)", Guard.NONE, rocket_only=True),
+        CommandSpec("LOCK:ALL", "Lock all servos to safe position (0°)", Guard.NONE, rocket_only=True),
     ]
 }
 
@@ -229,6 +270,15 @@ class CommandRecord:
         return (now or time.monotonic()) - self.sent_at
 
 
+BENCH_COMMANDS = (
+    "TEST1", "TEST2", "TEST3", "TEST4", "TEST5", "NEXT", "TEST6", "RESET", "START", "CONFIRM",
+    "DOOR:30", "DOOR:60", "DOOR:90", "LOCK:DOOR",
+    "CANSAT:30", "CANSAT:60", "CANSAT:90", "LOCK:CANSAT",
+    "SEPARATION:30", "SEPARATION:60", "SEPARATION:90", "LOCK:SEPARATION",
+    "LOCK:ALL",
+)
+
+
 class CommandCentre:
     """Tracks every command sent this session (§10.7).
 
@@ -248,6 +298,24 @@ class CommandCentre:
         self.modes: Dict[VehicleID, "VehicleModes"] = {
             v: VehicleModes() for v in VehicleID
         }
+
+        #: Vehicle safety state (Rocket defaults to UNARMED)
+        self.safety_states: Dict[VehicleID, RocketSafetyState] = {
+            VehicleID.ROCKET: RocketSafetyState.UNARMED
+        }
+
+    @property
+    def rocket_safety_state(self) -> RocketSafetyState:
+        return self.safety_states.get(VehicleID.ROCKET, RocketSafetyState.UNARMED)
+
+    def arm_rocket(self) -> None:
+        self.safety_states[VehicleID.ROCKET] = RocketSafetyState.ARMED
+
+    def disarm_rocket(self) -> None:
+        self.safety_states[VehicleID.ROCKET] = RocketSafetyState.UNARMED
+
+    def is_rocket_armed(self) -> bool:
+        return self.rocket_safety_state is RocketSafetyState.ARMED
 
     # ── sending ──────────────────────────────────────────────────────────
 
@@ -335,6 +403,8 @@ class CommandCentre:
         now = now or time.monotonic()
         out = []
         for rec in self.records:
+            if rec.command in BENCH_COMMANDS:
+                continue
             if rec.status is CommandStatus.SENT and rec.age(now) > self.ack_timeout:
                 rec.status = CommandStatus.TIMED_OUT
                 self.modes[rec.target].abandon(rec.sequence)

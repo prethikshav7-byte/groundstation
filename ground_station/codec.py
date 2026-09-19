@@ -46,6 +46,7 @@ agree exactly:
 """
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Sequence, Tuple
@@ -85,7 +86,29 @@ class CodecError(Exception):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _to_state(raw: str) -> FlightState:
-    key = raw.strip().upper().replace("-", "_").replace(" ", "_")
+    raw_str = raw.strip()
+    # Try numeric code first
+    try:
+        code = int(float(raw_str))
+        code_map = {
+            0: FlightState.BOOT,
+            1: FlightState.PRE_LAUNCH,
+            2: FlightState.BOOST,
+            3: FlightState.COAST,
+            4: FlightState.APOGEE,
+            5: FlightState.DESCENT,
+            6: FlightState.LANDING,
+            7: FlightState.RECOVERY,
+        }
+        if code in code_map:
+            return code_map[code]
+    except ValueError:
+        pass
+
+    # Try name string
+    key = raw_str.upper().replace("-", "_").replace(" ", "_")
+    if key == "PRELAUNCH":
+        return FlightState.PRE_LAUNCH
     try:
         return FlightState[key]
     except KeyError:
@@ -100,7 +123,17 @@ def _to_state(raw: str) -> FlightState:
 
 
 def _to_vehicle(raw: str) -> VehicleID:
-    key = raw.strip().upper()
+    raw_str = raw.strip()
+    try:
+        code = int(float(raw_str))
+        if code == 1:
+            return VehicleID.ROCKET
+        elif code == 2:
+            return VehicleID.CANSAT
+    except ValueError:
+        pass
+
+    key = raw_str.upper()
     try:
         return VehicleID[key]
     except KeyError:
@@ -115,6 +148,25 @@ def _to_float(raw: str) -> float:
         raise CodecError(RejectReason.NON_NUMERIC, f"{raw!r} is not a number")
 
 
+def _to_scaled_float(scale: float):
+    """Decode fields that may be transmitted as scaled integers or direct floats.
+    If no decimal point is present in the integer string, divides by scale factor.
+    """
+    def converter(raw: str) -> float:
+        raw_str = raw.strip()
+        try:
+            if "." in raw_str:
+                return float(raw_str)
+            else:
+                return float(int(raw_str)) / scale
+        except ValueError:
+            try:
+                return float(raw_str)
+            except ValueError:
+                raise CodecError(RejectReason.NON_NUMERIC, f"{raw!r} is not a number")
+    return converter
+
+
 def _to_int(raw: str) -> int:
     try:
         return int(float(raw))   # tolerate "12.0" from a float-formatting MCU
@@ -122,8 +174,24 @@ def _to_int(raw: str) -> int:
         raise CodecError(RejectReason.NON_NUMERIC, f"{raw!r} is not an integer")
 
 
+def _to_team_id(raw: str) -> Any:
+    raw_str = raw.strip()
+    try:
+        return int(float(raw_str))
+    except ValueError:
+        return raw_str
+
+
 def _to_str(raw: str) -> str:
     return raw.strip()
+
+
+def _to_accelerometer(raw: str) -> Any:
+    raw_str = raw.strip()
+    try:
+        return float(raw_str)
+    except ValueError:
+        return raw_str
 
 
 @dataclass(frozen=True)
@@ -132,19 +200,33 @@ class FieldDef:
     convert: Callable[[str], Any]
     unit: str = ""
     note: str = ""
-    #: Fixed-point format used when encoding (simulator, §13.6). Explicit
-    #: per field rather than a general float format, because a general one
-    #: emits scientific notation for large values — "9.9e+04" for pressure
-    #: parses fine here but is a poor thing to ask firmware to produce, and
-    #: the simulator has to emit lines that look like real ones (§2.2).
     fmt: str = "{:.2f}"
 
 
-#: §4.1 fields 1–20, in wire order. Field 21 (CHECKSUM) is not listed
-#: because it is a property of the *encoding*, not of the data — a binary
-#: codec would carry a CRC instead and nothing downstream would notice.
-FIELD_SPEC: Tuple[FieldDef, ...] = (
-    FieldDef("team_id",         _to_int,     "",      "constant",                          "{}"),
+#: 19-field live rocket telemetry specification ($T + 17 data fields + checksum = 19 fields)
+FIELD_SPEC_19: Tuple[FieldDef, ...] = (
+    FieldDef("team_id",           _to_team_id,                "",      "fixed format",                      "{}"),
+    FieldDef("mission_time",      _to_float,                  "s",     "time from boot",                    "{:.2f}"),
+    FieldDef("packet_count",      _to_int,                    "",      "packets sent during telemetry",     "{}"),
+    FieldDef("altitude",          _to_scaled_float(10.0),     "m",     "0.1m resolution, corrected",        "{:.2f}"),
+    FieldDef("pressure",          _to_float,                  "Pa",    "1Pa resolution",                    "{:.1f}"),
+    FieldDef("temperature",       _to_scaled_float(10.0),     "°C",    "0.1C resolution",                   "{:.2f}"),
+    FieldDef("battery_voltage",   _to_scaled_float(100.0),    "V",     "0.01V resolution",                  "{:.2f}"),
+    FieldDef("gnss_time",         _to_str,                    "",      "seconds UTC",                       "{}"),
+    FieldDef("gnss_latitude",     _to_scaled_float(10000.0),  "deg",   "0.0001 deg resolution",             "{:.6f}"),
+    FieldDef("gnss_longitude",    _to_scaled_float(10000.0),  "deg",   "0.0001 deg resolution",             "{:.6f}"),
+    FieldDef("gnss_altitude",     _to_scaled_float(10.0),     "m",     "0.1m resolution",                   "{:.2f}"),
+    FieldDef("gnss_satellites",   _to_int,                    "",      "number of satellites",              "{}"),
+    FieldDef("accelerometer",     _to_accelerometer,          "m/s²",  "m/s2 resolution",                   "{:.2f}"),
+    FieldDef("gyro_spin_rate",    _to_float,                  "deg/s", "deg/s spin rate",                   "{:.2f}"),
+    FieldDef("state",             _to_state,                  "",      "0..7 flight software state",        "{}"),
+    FieldDef("velocity",          _to_float,                  "m/s",   "m/s velocity",                      "{:.2f}"),
+    FieldDef("vehicle_id",        _to_vehicle,                "",      "1-ROCKET, 2-CANSAT",                "{}"),
+)
+
+#: Legacy 21-field wire order ($T + 20 payload fields + checksum = 21 fields)
+FIELD_SPEC_21: Tuple[FieldDef, ...] = (
+    FieldDef("team_id",         _to_team_id, "",      "constant",                          "{}"),
     FieldDef("vehicle_id",      _to_vehicle, "",      "routing key, §3.2",                 "{}"),
     FieldDef("mission_time",    _to_float,   "s",     "monotonic",                         "{:.2f}"),
     FieldDef("packet_count",    _to_int,     "",      "per-vehicle, never reset",          "{}"),
@@ -154,8 +236,6 @@ FIELD_SPEC: Tuple[FieldDef, ...] = (
     FieldDef("temperature",     _to_float,   "°C",    "",                                  "{:.2f}"),
     FieldDef("battery_voltage", _to_float,   "V",     "",                                  "{:.2f}"),
     FieldDef("gnss_time",       _to_str,     "",      "hh:mm:ss.ss UTC",                   "{}"),
-    # 6 dp ≈ 0.11 m of latitude — finer than the GNSS fix itself, and
-    # enough that a recovery walk-in is not limited by the wire format.
     FieldDef("gnss_latitude",   _to_float,   "deg",   "signed decimal",                    "{:.6f}"),
     FieldDef("gnss_longitude",  _to_float,   "deg",   "signed decimal",                    "{:.6f}"),
     FieldDef("gnss_altitude",   _to_float,   "m",     "MSL — different datum from field 6", "{:.2f}"),
@@ -168,8 +248,9 @@ FIELD_SPEC: Tuple[FieldDef, ...] = (
     FieldDef("gyro_z",          _to_float,   "deg/s", "",                                  "{:.2f}"),
 )
 
-N_FIELDS = len(FIELD_SPEC)              # 20 payload fields
-N_WIRE_FIELDS = N_FIELDS + 1            # + checksum = 21 (§4.1)
+FIELD_SPEC = FIELD_SPEC_19
+N_FIELDS = len(FIELD_SPEC_19)           # 17 payload fields
+N_WIRE_FIELDS = N_FIELDS + 1            # + checksum = 19 fields total with prefix $T
 
 #: Trailing extras the receiver may append (§3.4, §4.7), in the order a
 #: positional (non KEY=VALUE) implementation would most likely use them.
@@ -227,72 +308,213 @@ class PacketCodec(ABC):
 
     @abstractmethod
     def encode(self, values: Dict[str, Any]) -> str:
-        """Inverse of decode. Needed by the simulator (§13.6), which must
-        emit through the same format the parser consumes (§2.2) rather
-        than constructing TelemetryPacket objects directly — otherwise the
-        simulator cannot exercise the parser's own failure paths."""
+        """Inverse of decode."""
+
+
+def _decode_pkt_frame(line: str) -> DecodedFrame:
+    """Decode authoritative PHOENIX dB.V1 13-field KEY=VALUE telemetry packet."""
+    parts = [p.strip() for p in line.split(",") if p.strip()]
+    if len(parts) != 13:
+        raise CodecError(
+            RejectReason.FIELD_COUNT,
+            f"expected exactly 13 fields for PKT frame, got {len(parts)}",
+        )
+
+    required_keys = {"PKT", "P", "T", "ALT", "AX", "AY", "AZ", "LAT", "LON", "GALT", "SAT", "FIX", "SIM"}
+    parsed: Dict[str, float] = {}
+    for part in parts:
+        k, sep, v = part.partition("=")
+        if not sep:
+            raise CodecError(
+                RejectReason.FIELD_COUNT,
+                f"malformed field without '=' delimiter: {part!r}",
+            )
+        k_clean = k.strip().upper()
+        v_clean = v.strip()
+        try:
+            parsed[k_clean] = float(v_clean)
+        except ValueError:
+            raise CodecError(RejectReason.NON_NUMERIC, f"field {k_clean}: {v_clean!r} is not numeric")
+
+    missing_keys = required_keys - set(parsed.keys())
+    if missing_keys:
+        raise CodecError(
+            RejectReason.FIELD_COUNT,
+            f"missing required telemetry fields: {sorted(missing_keys)}",
+        )
+
+    pkt_count = int(parsed["PKT"])
+    pressure_val = parsed["P"]
+    ax, ay, az = parsed["AX"], parsed["AY"], parsed["AZ"]
+    accel_mag = math.sqrt(ax**2 + ay**2 + az**2)
+
+    values: Dict[str, Any] = {
+        "team_id": "PHOENIX dB.V1",
+        "vehicle_id": VehicleID.ROCKET,
+        "vehicle_code": 1,
+        "mission_time": float(pkt_count),
+        "packet_count": pkt_count,
+        "state": FlightState.BOOT,
+        "flight_state_code": 0,
+        "altitude": parsed["ALT"],
+        "pressure": pressure_val,
+        "temperature": parsed["T"],
+        "battery_voltage": 0.0,
+        "gnss_time": "",
+        "gnss_latitude": parsed["LAT"],
+        "gnss_longitude": parsed["LON"],
+        "gnss_altitude": parsed["GALT"],
+        "gnss_satellites": int(parsed["SAT"]),
+        "accel_x": ax,
+        "accel_y": ay,
+        "accel_z": az,
+        "accelerometer": accel_mag,
+        "gyro_x": 0.0,
+        "gyro_y": 0.0,
+        "gyro_z": 0.0,
+        "gyro_spin_rate": 0.0,
+        "velocity": None,
+        "raw_accelerometer": None,
+        "checksum": "",
+    }
+    extras = {
+        "gnss_fix": str(int(parsed["FIX"])),
+        "sim": str(int(parsed["SIM"])),
+        "SIM": str(int(parsed["SIM"])),
+    }
+    return DecodedFrame(values=values, extras=extras, unknown_extras=())
 
 
 class CsvCodec(PacketCodec):
-    """Line-oriented ASCII CSV — the format in use today (§4.1)."""
+    """Line-oriented ASCII CSV for live telemetry packets."""
 
-    name = "CSV (21 fields)"
+    name = "CSV"
 
     def decode(self, frame: str) -> DecodedFrame:
         line = frame.strip()
-        if line.startswith(PREFIX_TELEMETRY + ","):
-            body = line[len(PREFIX_TELEMETRY) + 1:]
-        else:
+        if line.startswith("PKT="):
+            return _decode_pkt_frame(line)
+
+        if not line.startswith(PREFIX_TELEMETRY + ","):
             raise CodecError(RejectReason.FIELD_COUNT,
                              f"missing {PREFIX_TELEMETRY} prefix")
 
-        parts = body.split(",")
+        parts = [p.strip() for p in line.split(",")]
 
-        # §4.7 — accept extra fields beyond 21 rather than rejecting.
-        if len(parts) < N_WIRE_FIELDS:
-            raise CodecError(
-                RejectReason.FIELD_COUNT,
-                f"expected at least {N_WIRE_FIELDS} fields, got {len(parts)}",
-            )
+        # Distinguish 21-field legacy format vs 19-field designated format
+        # 19 fields: $T + 17 payload + checksum = 19 fields
+        # 21 fields: $T + 20 payload + checksum = 21 fields
+        is_21 = len(parts) >= 21 and (parts[2].upper() in ("ROCKET", "CANSAT") or parts[1].upper() in ("ROCKET", "CANSAT"))
 
-        payload_fields = parts[:N_FIELDS]
-        checksum_field = parts[N_FIELDS].strip()
-        extra_fields = parts[N_WIRE_FIELDS:]
+        if is_21:
+            spec_list = FIELD_SPEC_21
+            n_fields = len(FIELD_SPEC_21)
+            payload_fields = parts[1:1 + n_fields]
+            checksum_field = parts[1 + n_fields].strip() if len(parts) > 1 + n_fields else ""
+            extra_fields = parts[2 + n_fields:]
+        else:
+            if len(parts) < 19:
+                raise CodecError(
+                    RejectReason.FIELD_COUNT,
+                    f"expected exactly 19 fields, got {len(parts)}",
+                )
+            if len(parts) > 19 and not any("=" in p for p in parts[19:]):
+                raise CodecError(
+                    RejectReason.FIELD_COUNT,
+                    f"expected exactly 19 fields, got {len(parts)}",
+                )
+            spec_list = FIELD_SPEC_19
+            n_fields = len(FIELD_SPEC_19)
+            payload_fields = parts[1:1 + n_fields]
+            checksum_field = parts[1 + n_fields].strip() if len(parts) > 1 + n_fields else ""
+            extra_fields = parts[2 + n_fields:]
 
-        # ── verify before converting ─────────────────────────────────────
-        # Order matters: a corrupted line can trivially also be
-        # non-numeric, and reporting it as NON_NUMERIC would send whoever
-        # reads the log hunting a firmware formatting bug that isn't
-        # there. Checksum failure is the more specific diagnosis, so it
-        # wins.
+        # ── verify checksum before converting ────────────────────────────
         covered = PREFIX_TELEMETRY + "," + ",".join(payload_fields)
         expected = xor_checksum(covered)
-        if checksum_field.upper() != expected:
-            raise CodecError(
-                RejectReason.CHECKSUM,
-                f"got {checksum_field!r}, computed {expected}",
-            )
+        if checksum_field:
+            ck_match = (checksum_field.upper() == expected)
+            if not ck_match:
+                try:
+                    ck_match = (int(checksum_field) == int(expected, 16))
+                except ValueError:
+                    pass
+            if not ck_match:
+                raise CodecError(
+                    RejectReason.CHECKSUM,
+                    f"got {checksum_field!r}, computed {expected}",
+                )
 
         values: Dict[str, Any] = {}
-        for spec, raw in zip(FIELD_SPEC, payload_fields):
+        for spec, raw in zip(spec_list, payload_fields):
             try:
                 values[spec.name] = spec.convert(raw)
             except CodecError as e:
-                # Re-raise with the field name attached — "not a number"
-                # on its own is useless when there are 20 candidates.
                 raise CodecError(e.reason, f"field {spec.name}: {e.detail}")
 
+        # Set codes and defaults
+        if "state" in values:
+            state_val = values["state"]
+            if isinstance(state_val, FlightState):
+                values["flight_state_code"] = state_val.ordinal
+        if "vehicle_id" in values:
+            vid_val = values["vehicle_id"]
+            if isinstance(vid_val, VehicleID):
+                values["vehicle_code"] = 1 if vid_val is VehicleID.ROCKET else 2
+
+        if not is_21:
+            accel_val = values.get("accelerometer")
+            if isinstance(accel_val, (int, float)):
+                values["accel_z"] = float(accel_val)
+                values["accelerometer"] = float(accel_val)
+                values["raw_accelerometer"] = None
+            elif isinstance(accel_val, str):
+                values["raw_accelerometer"] = accel_val
+                values["accelerometer"] = None
+            else:
+                values["accelerometer"] = None
+                values["raw_accelerometer"] = None
+            values.setdefault("accel_x", 0.0)
+            values.setdefault("accel_y", 0.0)
+            values.setdefault("accel_z", 0.0)
+            values.setdefault("gyro_x", 0.0)
+            values.setdefault("gyro_y", 0.0)
+            values.setdefault("gyro_z", values.get("gyro_spin_rate", 0.0))
+        else:
+            values.setdefault("gyro_spin_rate", values.get("gyro_z", 0.0))
+            values.setdefault("velocity", None)
+            values.setdefault("raw_accelerometer", None)
+            values.setdefault("accelerometer", None)
+
+        values["checksum"] = checksum_field
         extras, unknown = _parse_extras(extra_fields)
         return DecodedFrame(values=values, extras=extras, unknown_extras=unknown)
 
     def encode(self, values: Dict[str, Any]) -> str:
         out: List[str] = []
-        for spec in FIELD_SPEC:
-            v = values[spec.name]
+        is_19 = "gyro_spin_rate" in values or "velocity" in values or "accelerometer" in values or ("accel_x" not in values)
+        spec_list = FIELD_SPEC_19 if is_19 else FIELD_SPEC_21
+        for spec in spec_list:
+            v = values.get(spec.name)
+            if v is None:
+                if spec.name == "accelerometer":
+                    v = values.get("accel_z", 0.0)
+                elif spec.name == "gyro_spin_rate":
+                    v = values.get("gyro_z", 0.0)
+                elif spec.name == "velocity":
+                    v = 0.0
+                elif spec.name == "vehicle_id":
+                    v = values.get("vehicle_id", VehicleID.ROCKET)
+                elif spec.name == "state":
+                    v = values.get("state", FlightState.BOOT)
+                else:
+                    v = 0
             if isinstance(v, (VehicleID, FlightState)):
                 out.append(v.value)
-            else:
+            elif isinstance(v, float):
                 out.append(spec.fmt.format(v))
+            else:
+                out.append(str(v))
         covered = PREFIX_TELEMETRY + "," + ",".join(out)
         return covered + "," + xor_checksum(covered)
 

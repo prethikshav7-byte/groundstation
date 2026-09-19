@@ -222,6 +222,18 @@ class OutageTracker:
         reconciliation, marked subtly by the renderer."""
         self.breaks.append((x1, x2))
 
+    def trim_breaks(self, oldest_x: float) -> None:
+        """Drop break records that can never be drawn (\u00a713.2).
+
+        A break whose right endpoint is older than the buffer's oldest
+        retained sample will never fall inside a visible window.  Keeping
+        it means _split_on_breaks() scans it on every redraw for nothing.
+        Called from _redraw() once per frame with buf.xs[0] as the anchor.
+        """
+        if not self.breaks:
+            return
+        self.breaks = [b for b in self.breaks if b[1] >= oldest_x]
+
     def reset(self) -> None:
         self._open = False
         self.gap_resolved = False

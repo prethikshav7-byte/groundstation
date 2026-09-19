@@ -21,8 +21,8 @@ The two flags are a development convenience. They do not create a third
 mode: they preselect one of the same two and take the same code path.
 """
 from __future__ import annotations
-
 import argparse
+import shutil
 import sys
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
@@ -87,6 +87,7 @@ def main() -> int:
     # record, and a record that starts a beat late is missing the moment
     # a bad connection usually announces itself.
     logs = SessionLogs(args.log_dir)
+    _check_disk_space(args.log_dir, window)
 
     # §2.2 — both objects expose the same signals, so nothing below this
     # line branches on which mode is running.
@@ -143,6 +144,44 @@ def _attach_logging(source, logs: SessionLogs) -> None:
         lambda st: logs.raw.write_event("RECEIVER", st.value))
     source.vehicle_state_changed.connect(
         lambda vid, st: logs.raw.write_event("VEHICLE", f"{vid.value} {st.value}"))
+
+
+def _check_disk_space(log_dir: str, window) -> None:
+    """Warn the operator if the log partition is running low.
+
+    §12.2 forbids rotation ("the log is the flight record"), so there is
+    nothing to do except alert early.  Thresholds:
+      < 500 MB  — advisory warning; operator can dismiss and continue.
+      <  50 MB  — critical; likely to exhaust mid-flight.  Operator must
+                   acknowledge before the session starts.
+    """
+    try:
+        usage = shutil.disk_usage(log_dir)
+        free_mb = usage.free / (1024 * 1024)
+    except OSError:
+        # Can't stat — not fatal; the sink's write() will catch errors later.
+        return
+
+    if free_mb < 50:
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.critical(
+            window,
+            "Critically low disk space",
+            f"Only {free_mb:.0f} MB free in '{log_dir}'.\n\n"
+            f"A 12-hour session writes ~170 MB. The disk will likely fill\n"
+            f"mid-flight and logging will stop silently.\n\n"
+            f"Free up space before starting, or change --log-dir.\n\n"
+            f"(Rotation is not offered — §12.2: the log is the flight record.)"
+        )
+    elif free_mb < 500:
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.warning(
+            window,
+            "Low disk space",
+            f"Only {free_mb:.0f} MB free in '{log_dir}'.\n\n"
+            f"A 12-hour session writes ~170 MB. Consider freeing space\n"
+            f"or changing --log-dir before a long flight."
+        )
 
 
 if __name__ == "__main__":

@@ -138,13 +138,42 @@ class ActuatorPanel(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(4)
-        for delta in self.STEPS:
-            b = QPushButton(f"{delta:+.0f}°")
-            b.setFont(QFont("monospace", 8))
-            b.setStyleSheet(_btn_css(c.TEXT))
-            b.clicked.connect(lambda _c, d=delta: self._request(d))
-            self._buttons[delta] = b
-            row.addWidget(b)
+        if self.spec.id == "ACT_DOOR":
+            self._open_btn = QPushButton("Open")
+            self._open_btn.setFont(QFont("monospace", 8, QFont.Weight.Bold))
+            self._open_btn.setStyleSheet(_btn_css(c.TEXT))
+            self._open_btn.setToolTip("Open rocket door (requires Arm)")
+            self._open_btn.clicked.connect(self._request_open)
+            row.addWidget(self._open_btn)
+
+            self._arm_btn = QPushButton("Arm")
+            self._arm_btn.setFont(QFont("monospace", 8, QFont.Weight.Bold))
+            self._arm_btn.setStyleSheet(_btn_css(c.RED))
+            self._arm_btn.setToolTip("Arm before opening rocket door")
+            self._arm_btn.clicked.connect(self._toggle_arm)
+            row.addWidget(self._arm_btn)
+
+            self._btn_minus_1 = QPushButton("-1")
+            self._btn_minus_1.setFont(QFont("monospace", 8))
+            self._btn_minus_1.setStyleSheet(_btn_css(c.TEXT))
+            self._btn_minus_1.setToolTip("Step -1°")
+            self._btn_minus_1.clicked.connect(lambda _c: self._request(-1.0))
+            row.addWidget(self._btn_minus_1)
+
+            self._btn_plus_1 = QPushButton("+1")
+            self._btn_plus_1.setFont(QFont("monospace", 8))
+            self._btn_plus_1.setStyleSheet(_btn_css(c.TEXT))
+            self._btn_plus_1.setToolTip("Step +1°")
+            self._btn_plus_1.clicked.connect(lambda _c: self._request(1.0))
+            row.addWidget(self._btn_plus_1)
+        else:
+            for delta in self.STEPS:
+                b = QPushButton(f"{delta:+.0f}°")
+                b.setFont(QFont("monospace", 8))
+                b.setStyleSheet(_btn_css(c.TEXT))
+                b.clicked.connect(lambda _c, d=delta: self._request(d))
+                self._buttons[delta] = b
+                row.addWidget(b)
         lay.addLayout(row)
 
         self._note = QLabel("")
@@ -153,7 +182,7 @@ class ActuatorPanel(QWidget):
         self._note.setWordWrap(True)
         lay.addWidget(self._note)
 
-        if self.spec.destructive:
+        if self.spec.destructive and self.spec.id != "ACT_DOOR":
             self._arm = QPushButton("Arm")
             self._arm.setFont(QFont("monospace", 9, QFont.Weight.Bold))
             self._arm.setStyleSheet(_btn_css(c.RED))
@@ -176,7 +205,37 @@ class ActuatorPanel(QWidget):
 
     # ── actions ──────────────────────────────────────────────────────────
 
+    def _request_open(self) -> None:
+        if not self.arming.is_armed(self.spec.id):
+            self._note.setText("Arm this control before commanding Open.")
+            return
+
+        if self.actuator.position is None:
+            self._note.setText("Actual position unknown — waiting for echo")
+            return
+
+        target = self.spec.range_hi
+        delta = target - self.actuator.position
+        if delta <= 0:
+            self._note.setText(f"Door already fully open ({self.actuator.position:.1f}°)")
+            return
+
+        result = self.actuator.evaluate(delta)
+        self._note.setText(result.message)
+
+        if result.delta_applied == 0.0:
+            return
+
+        if not self.arming.fire(self.spec.id):
+            return
+        self.move_requested.emit(self.spec.id, result.delta_applied)
+
     def _request(self, delta: float) -> None:
+        if self.spec.destructive:
+            if not self.arming.is_armed(self.spec.id):
+                self._note.setText("Arm this control before commanding a move.")
+                return
+
         result = self.actuator.evaluate(delta)
         # §10.1.1 — a clamped move is reported, never silent, never
         # wrapping. Shown here whether or not the move then proceeds.
@@ -186,10 +245,6 @@ class ActuatorPanel(QWidget):
             return
 
         if self.spec.destructive:
-            key = f"{self.spec.id}:{delta:+.0f}"
-            if not self.arming.is_armed(self.spec.id):
-                self._note.setText("Arm this control before commanding a move.")
-                return
             if not self.arming.fire(self.spec.id):
                 return
         self.move_requested.emit(self.spec.id, result.delta_applied)
@@ -236,25 +291,44 @@ class ActuatorPanel(QWidget):
             self._mismatch.setText(
                 "COMMANDED AND ACTUAL DISAGREE — mechanism may be jammed")
 
-        for delta, b in self._buttons.items():
-            allowed = self._enabled
-            if abs(delta) >= 180.0:
-                # §10.1.1 — disabled unless at home, rather than offered
-                # and then clamped. "A control that is nearly always
-                # impossible trains operators to ignore clamp warnings."
-                allowed = allowed and a.at_home
-                b.setToolTip("" if a.at_home else
-                             "±180° is reachable only from the home position")
-            b.setEnabled(allowed)
-
-        if self._arm is not None:
+        if self.spec.id == "ACT_DOOR":
             armed = self.arming.is_armed(self.spec.id)
             remaining = self.arming.seconds_remaining()
-            self._arm.setEnabled(self._enabled)
-            self._arm.setText(
-                f"ARMED — fire within {remaining:.0f} s   (click to disarm)"
-                if armed else "Arm")
-            self._arm.setStyleSheet(_btn_css(c.RED if armed else c.TEXT_DIM))
+            self._open_btn.setEnabled(self._enabled)
+            self._arm_btn.setEnabled(self._enabled)
+            self._btn_minus_1.setEnabled(self._enabled)
+            self._btn_plus_1.setEnabled(self._enabled)
+
+            if armed:
+                self._arm_btn.setText(
+                    f"ARMED ({remaining:.0f}s)" if remaining > 0 else "ARMED")
+                self._arm_btn.setStyleSheet(_btn_css(c.RED))
+                self._arm_btn.setToolTip(
+                    f"Armed — fire within {remaining:.0f} s (click to disarm)")
+            else:
+                self._arm_btn.setText("Arm")
+                self._arm_btn.setStyleSheet(_btn_css(c.RED))
+                self._arm_btn.setToolTip("Arm before opening rocket door")
+        else:
+            for delta, b in self._buttons.items():
+                allowed = self._enabled
+                if abs(delta) >= 180.0:
+                    # §10.1.1 — disabled unless at home, rather than offered
+                    # and then clamped. "A control that is nearly always
+                    # impossible trains operators to ignore clamp warnings."
+                    allowed = allowed and a.at_home
+                    b.setToolTip("" if a.at_home else
+                                 "±180° is reachable only from the home position")
+                b.setEnabled(allowed)
+
+            if self._arm is not None:
+                armed = self.arming.is_armed(self.spec.id)
+                remaining = self.arming.seconds_remaining()
+                self._arm.setEnabled(self._enabled)
+                self._arm.setText(
+                    f"ARMED — fire within {remaining:.0f} s   (click to disarm)"
+                    if armed else "Arm")
+                self._arm.setStyleSheet(_btn_css(c.RED if armed else c.TEXT_DIM))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

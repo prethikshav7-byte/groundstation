@@ -38,6 +38,7 @@ latency or spot a vehicle whose clock has jumped.
 """
 from __future__ import annotations
 
+import errno
 import os
 import threading
 import time
@@ -86,7 +87,27 @@ class _Sink:
         if self._fh is None:
             return
         with self._lock:
-            self._fh.write(line + "\n")
+            try:
+                self._fh.write(line + "\n")
+            except OSError as exc:
+                # §12.2 forbids rotation, but a full disk must not crash the
+                # Qt slot dispatcher on every incoming packet.  Close the
+                # handle so subsequent write() calls return immediately, and
+                # print once to stderr so the operator can see what happened.
+                import sys
+                is_nospc = (getattr(exc, "errno", None) == errno.ENOSPC)
+                reason = "disk full" if is_nospc else str(exc)
+                print(
+                    f"[LOG] {self.path}: write failed ({reason}) — "
+                    f"logging halted for this file.",
+                    file=sys.stderr,
+                )
+                try:
+                    self._fh.close()
+                except Exception:
+                    pass
+                self._fh = None
+                return
             self.lines_written += 1
             now = time.monotonic()
             if now - self._last_flush >= FLUSH_INTERVAL_S:

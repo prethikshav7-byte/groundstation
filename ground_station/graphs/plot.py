@@ -32,7 +32,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
-from PyQt6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QHBoxLayout, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+)
 
 from .. import axes as axspec
 from ..models import FlightState
@@ -216,6 +218,7 @@ class TelemetryGraph(QWidget):
         self.plot.getAxis("bottom").setHeight(38)
         for side in ("left", "bottom"):
             ax = self.plot.getAxis(side)
+            ax.enableAutoSIPrefix(False)
             ax.setPen(pg.mkPen(c.BORDER))
             ax.setTextPen(pg.mkPen(c.TEXT_DIM))
             ax.setStyle(tickFont=QFont("monospace", 8))
@@ -233,6 +236,37 @@ class TelemetryGraph(QWidget):
                 lbl.setFont(QFont("monospace", 8))
                 self.plot.addItem(lbl)
                 self._labels[name] = lbl
+
+        # Graph control toolbar (Reset, Zoom Out, Zoom In)
+        tb = QHBoxLayout()
+        tb.setContentsMargins(0, 0, 2, 2)
+        tb.setSpacing(3)
+        tb.addStretch()
+
+        btn_style = ThemeManager.graph_button_stylesheet()
+
+        self.btn_reset = QPushButton("⟲")
+        self.btn_reset.setToolTip("Reset view (auto-follow)")
+        self.btn_reset.setStyleSheet(btn_style)
+        self.btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reset.clicked.connect(lambda: self.reset_view())
+
+        self.btn_zoom_out = QPushButton("−")
+        self.btn_zoom_out.setToolTip("Zoom out (-)")
+        self.btn_zoom_out.setStyleSheet(btn_style)
+        self.btn_zoom_out.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_zoom_out.clicked.connect(lambda: self.zoom_out())
+
+        self.btn_zoom_in = QPushButton("+")
+        self.btn_zoom_in.setToolTip("Zoom in (+)")
+        self.btn_zoom_in.setStyleSheet(btn_style)
+        self.btn_zoom_in.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_zoom_in.clicked.connect(lambda: self.zoom_in())
+
+        tb.addWidget(self.btn_reset)
+        tb.addWidget(self.btn_zoom_out)
+        tb.addWidget(self.btn_zoom_in)
+        layout.addLayout(tb)
 
         layout.addWidget(self.plot)
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
@@ -304,6 +338,8 @@ class TelemetryGraph(QWidget):
         guarantees that; an unclamped multiply could pass through zero and
         invert the axis.
         """
+        if self._follow:
+            self._x_span = max(self._latest_x, self.zoom_spec.max_zoom_span_s)
         min_span = self.zoom_spec.max_zoom_span_s      # tightest view
         max_span = max(self._latest_x, min_span)       # §7.3 full mission
         new_span = self._x_span * max(0.1, factor)
@@ -311,12 +347,25 @@ class TelemetryGraph(QWidget):
         self._follow = False                           # §7.3 manual breaks follow
         self._dirty = True
 
+    def zoom_in(self, factor: Optional[float] = None) -> None:
+        """Zoom in on the time window."""
+        f = 0.75 if factor is None or isinstance(factor, bool) else factor
+        self._apply_zoom(f)
+        self._redraw()
+
+    def zoom_out(self, factor: Optional[float] = None) -> None:
+        """Zoom out on the time window."""
+        f = 1.33 if factor is None or isinstance(factor, bool) else factor
+        self._apply_zoom(f)
+        self._redraw()
+
     def reset_view(self) -> None:
         """§7.3 — Reset returns to min zoom following live data, not to a
         fixed default range."""
         self._x_span = max(self._latest_x, self.zoom_spec.max_zoom_span_s)
         self._follow = True
         self._dirty = True
+        self._redraw()
 
     # ── data in ──────────────────────────────────────────────────────────
 
@@ -402,6 +451,13 @@ class TelemetryGraph(QWidget):
         lo_all: Optional[float] = None
         hi_all: Optional[float] = None
 
+        # §13.2 / Fix 2 — trim break records that are older than the
+        # buffer's oldest retained sample; they can never be drawn and
+        # their accumulation makes _split_on_breaks() O(N) on every frame.
+        oldest_xs = [buf.xs[0] for buf in self._buffers.values() if buf.xs]
+        if oldest_xs:
+            self._outage.trim_breaks(min(oldest_xs))
+
         for name, _ in self._traces:
             buf = self._buffers[name]
             xs, ys = buf.window(x_lo, x_hi)
@@ -459,9 +515,9 @@ class TelemetryGraph(QWidget):
         for i, (x, y) in enumerate(zip(xs, ys)):
             while bi < len(breaks) and x > breaks[bi][1]:
                 bi += 1
-            if bi < len(breaks) and breaks[bi][0] < x <= breaks[bi][1]:
+            if bi < len(breaks) and breaks[bi][0] < x < breaks[bi][1]:
                 if out_x and out_x[-1] == out_x[-1]:
-                    out_x.append(x)
+                    out_x.append(0.5 * (breaks[bi][0] + breaks[bi][1]))
                     out_y.append(float("nan"))
                 continue
             out_x.append(x)

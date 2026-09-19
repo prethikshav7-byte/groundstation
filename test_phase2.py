@@ -37,7 +37,7 @@ lo, hi = axes.clamp_range(axes.PRESSURE, 89000.0, 89100.0)
 check("pressure min span 500 Pa", abs((hi - lo) - 500.0) < 1e-9, (lo, hi))
 
 print("\n§6.3/§6.4 axis titles")
-check("velocity tagged derived", axes.VELOCITY.axis_title().endswith("derived"))
+check("velocity labelled properly", axes.VELOCITY.axis_title().startswith("Velocity"))
 check("descent rate labelled per vehicle",
       axes.DESCENT_RATE.axis_title().startswith("Descent Rate"))
 check("same underlying key", axes.VELOCITY.key == axes.DESCENT_RATE.key)

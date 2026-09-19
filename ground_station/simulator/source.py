@@ -60,7 +60,8 @@ class SimulatedSource(QObject):
                  thresholds: Optional[LossThresholds] = None,
                  parent=None):
         super().__init__(parent)
-        self.engine = SimulatorEngine(schedule, profile)
+        active_schedule = schedule if schedule is not None else FaultSchedule()
+        self.engine = SimulatorEngine(active_schedule, profile)
         self.demux = TelemetryDemux(self.engine.codec, thresholds)
 
         self._receiver_state = ReceiverState.NO_HEARTBEAT

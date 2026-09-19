@@ -31,7 +31,7 @@ from typing import List, Optional, Sequence, Tuple
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFont
-from PyQt6.QtWidgets import QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 from ..theme import ThemeManager
 from .parser import ExperimentDataset, split_on_time_gaps
@@ -77,6 +77,7 @@ class AerosolProfilePlot(QWidget):
 
         for side in ("left", "bottom"):
             ax = self.plot.getAxis(side)
+            ax.enableAutoSIPrefix(False)
             ax.setPen(pg.mkPen(c.BORDER))
             ax.setTextPen(pg.mkPen(c.TEXT_DIM))
             ax.setStyle(tickFont=QFont("monospace", 8))
@@ -100,6 +101,37 @@ class AerosolProfilePlot(QWidget):
         self._descent_label.setFont(QFont("monospace", 8))
         self.plot.addItem(self._ascent_label)
         self.plot.addItem(self._descent_label)
+
+        # Graph control toolbar (Reset, Zoom Out, Zoom In)
+        tb = QHBoxLayout()
+        tb.setContentsMargins(0, 0, 2, 2)
+        tb.setSpacing(3)
+        tb.addStretch()
+
+        btn_style = ThemeManager.graph_button_stylesheet()
+
+        self.btn_reset = QPushButton("⟲")
+        self.btn_reset.setToolTip("Reset view (auto-scale)")
+        self.btn_reset.setStyleSheet(btn_style)
+        self.btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reset.clicked.connect(lambda: self.reset_view())
+
+        self.btn_zoom_out = QPushButton("−")
+        self.btn_zoom_out.setToolTip("Zoom out (-)")
+        self.btn_zoom_out.setStyleSheet(btn_style)
+        self.btn_zoom_out.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_zoom_out.clicked.connect(lambda: self.zoom_out())
+
+        self.btn_zoom_in = QPushButton("+")
+        self.btn_zoom_in.setToolTip("Zoom in (+)")
+        self.btn_zoom_in.setStyleSheet(btn_style)
+        self.btn_zoom_in.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_zoom_in.clicked.connect(lambda: self.zoom_in())
+
+        tb.addWidget(self.btn_reset)
+        tb.addWidget(self.btn_zoom_out)
+        tb.addWidget(self.btn_zoom_in)
+        lay.addLayout(tb)
 
         lay.addWidget(self.plot)
         self.grabGesture(Qt.GestureType.PinchGesture)
@@ -225,6 +257,16 @@ class AerosolProfilePlot(QWidget):
         data extent and 5 m of altitude."""
         self.vb.scaleBy((factor, factor))
 
+    def zoom_in(self, factor: Optional[float] = None) -> None:
+        """Zoom in on profile plot."""
+        f = 0.8 if factor is None or isinstance(factor, bool) else factor
+        self._zoom(f)
+
+    def zoom_out(self, factor: Optional[float] = None) -> None:
+        """Zoom out on profile plot."""
+        f = 1.25 if factor is None or isinstance(factor, bool) else factor
+        self._zoom(f)
+
     def reset_view(self) -> None:
         self._autoscale()
 
@@ -256,11 +298,59 @@ class SecondaryPlot(QWidget):
             "Altitude (m AGL)" if which == "altitude"
             else "Aerosol Count (particles/cm³)", **style)
         self.plot.getAxis("left").setWidth(74)
+        for side in ("left", "bottom"):
+            self.plot.getAxis(side).enableAutoSIPrefix(False)
 
         colour = c.GREEN if which == "altitude" else c.CYAN
         self._curve = self.plot.plot([], [], pen=pg.mkPen(QColor(colour), width=2),
                                      connect="finite")
+
+        # Graph control toolbar (Reset, Zoom Out, Zoom In)
+        tb = QHBoxLayout()
+        tb.setContentsMargins(0, 0, 2, 2)
+        tb.setSpacing(3)
+        tb.addStretch()
+
+        btn_style = ThemeManager.graph_button_stylesheet()
+
+        self.btn_reset = QPushButton("⟲")
+        self.btn_reset.setToolTip("Reset view (fit data)")
+        self.btn_reset.setStyleSheet(btn_style)
+        self.btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reset.clicked.connect(lambda: self.reset_view())
+
+        self.btn_zoom_out = QPushButton("−")
+        self.btn_zoom_out.setToolTip("Zoom out (-)")
+        self.btn_zoom_out.setStyleSheet(btn_style)
+        self.btn_zoom_out.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_zoom_out.clicked.connect(lambda: self.zoom_out())
+
+        self.btn_zoom_in = QPushButton("+")
+        self.btn_zoom_in.setToolTip("Zoom in (+)")
+        self.btn_zoom_in.setStyleSheet(btn_style)
+        self.btn_zoom_in.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_zoom_in.clicked.connect(lambda: self.zoom_in())
+
+        tb.addWidget(self.btn_reset)
+        tb.addWidget(self.btn_zoom_out)
+        tb.addWidget(self.btn_zoom_in)
+        lay.addLayout(tb)
+
         lay.addWidget(self.plot)
+
+    def zoom_in(self, factor: Optional[float] = None) -> None:
+        """Zoom in on secondary plot."""
+        f = 0.8 if factor is None or isinstance(factor, bool) else factor
+        self.vb.scaleBy((f, f))
+
+    def zoom_out(self, factor: Optional[float] = None) -> None:
+        """Zoom out on secondary plot."""
+        f = 1.25 if factor is None or isinstance(factor, bool) else factor
+        self.vb.scaleBy((f, f))
+
+    def reset_view(self) -> None:
+        """Reset view to auto-fit."""
+        self.vb.autoRange()
 
     def set_dataset(self, ds: Optional[ExperimentDataset]) -> None:
         if ds is None or ds.empty:

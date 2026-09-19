@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont
 from PyQt6.QtWidgets import (
     QGridLayout, QHBoxLayout, QHeaderView, QLabel, QPushButton,
@@ -44,6 +44,13 @@ from ..widgets.telemetry_panel import TelemetryPanel
 
 class VehiclePage(QWidget):
     """§9 — gauges, six graphs, telemetry panel, state timeline."""
+
+    #: Emitted when a backward state transition is detected (§5.2), carrying
+    #: a human-readable description.  Connected in app.py to the status bar
+    #: so the operator sees the anomaly without having to scroll to the
+    #: timeline panel.  A signal with no receiver would be worse than
+    #: nothing — it looks like the feature exists when it doesn’t.
+    backward_transition = pyqtSignal(str)
 
     def __init__(self, vehicle_id: VehicleID, parent=None):
         super().__init__(parent)
@@ -114,6 +121,11 @@ class VehiclePage(QWidget):
             f"color: {c.CYAN}; padding: 0 16px;")
         row.addWidget(self._mission_clock)
 
+        self._gnss_label = QLabel("GNSS: —")
+        self._gnss_label.setFont(QFont("monospace", FS_CAPTION, QFont.Weight.Bold))
+        self._gnss_label.setStyleSheet(f"color: {c.TEXT_DIM}; padding: 0 12px;")
+        row.addWidget(self._gnss_label)
+
         row.addStretch()
 
         self._mode_button = QPushButton("Show analog gauges")
@@ -169,7 +181,7 @@ class VehiclePage(QWidget):
             ("temperature",     axspec.TEMPERATURE,     None),
             ("accel_magnitude", axspec.ACCEL_MAGNITUDE, None),
             ("pressure",        axspec.PRESSURE,        None),
-            ("orientation",     axspec.ORIENTATION,     xyz),
+            ("orientation",     axspec.ORIENTATION,     None),
         ]
         for i, (key, spec, traces) in enumerate(specs):
             g = TelemetryGraph(key, spec=spec, traces=traces)
@@ -282,44 +294,66 @@ class VehiclePage(QWidget):
 
         # §5.2 — backward transitions are displayed with an anomaly flag,
         # never suppressed.  observe() returns every entry it appended;
-        # we surface backward ones immediately rather than waiting for the
-        # operator to scroll down to the timeline panel.
+        # we surface backward ones immediately via the backward_transition
+        # signal so the status bar catches them without the operator
+        # having to scroll to the timeline panel.
         for entry in self.timeline.observe(packet.state, packet.mission_time):
             if entry.backward:
-                self.panel.set_link_state(self.panel._link)  # force status refresh
-                # Anomaly notice shown in the panel's note area.
-                _note = getattr(self.panel, '_note', None)
-                if _note is not None:
-                    _note.setText(
-                        f"\u26a0 BACKWARD TRANSITION: {packet.state.value} "
-                        f"at T+{packet.mission_time:.2f} s \u2014 see timeline")
-                    _note.setVisible(True)
+                self.backward_transition.emit(
+                    f"⚠ BACKWARD TRANSITION: {packet.state.value} "
+                    f"at T+{packet.mission_time:.2f} s — see timeline")
         self._refresh_timeline()
 
         # Gauges are throttled internally (§6.1) so they are fed every
         # packet; the widget decides when to repaint.
         self.gauges["altitude"].set_value(packet.altitude)
-        self.gauges["velocity"].set_value(v)
+        v_final = packet.velocity if packet.velocity is not None else v
+        self.gauges["velocity"].set_value(v_final)
         self.gauges["pressure"].set_value(packet.pressure)
         self.gauges["temperature"].set_value(packet.temperature)
         self.gauges["battery_voltage"].set_value(packet.battery_voltage)
         self.gauges["rssi"].set_value(packet.rssi)
-        accel_mag = math.sqrt(
-            packet.accel_x ** 2 + packet.accel_y ** 2 + packet.accel_z ** 2)
-        self.gauges["accel_magnitude"].set_value(accel_mag)
+
+        # GNSS status display (≥ 6 satellites = minimum reached, < 6 = insufficient)
+        sats = packet.gnss_satellites
+        fix_valid = packet.gnss_fix == 1 if hasattr(packet, "gnss_fix") else (sats > 0)
+        sim_tag = " (SIM)" if getattr(packet, "is_simulation", False) else ""
+        c = ThemeManager.C()
+        if sats >= 6 and fix_valid and (packet.gnss_latitude != 0.0 or packet.gnss_longitude != 0.0):
+            self._gnss_label.setText(
+                f"GNSS{sim_tag}: {sats} SAT (LOCK) · {packet.gnss_latitude:.6f}°, {packet.gnss_longitude:.6f}° · {packet.gnss_altitude:.1f} m"
+            )
+            self._gnss_label.setStyleSheet(f"color: {c.GREEN}; font-weight: bold; padding: 0 12px;")
+        elif sats > 0:
+            status_text = f"INSUFFICIENT ({sats} SAT < 6)" if sats < 6 else "NO FIX"
+            self._gnss_label.setText(
+                f"GNSS{sim_tag}: {sats} SAT ({status_text})"
+            )
+            self._gnss_label.setStyleSheet(f"color: {c.AMBER}; font-weight: bold; padding: 0 12px;")
+        else:
+            self._gnss_label.setText(f"GNSS{sim_tag}: NO FIX (0 SAT)")
+            self._gnss_label.setStyleSheet(f"color: {c.TEXT_DIM}; padding: 0 12px;")
+
+        # Acceleration processing
+        accel_val = packet.accelerometer
+        if accel_val is None and packet.raw_accelerometer is None and (packet.accel_x != 0.0 or packet.accel_y != 0.0 or packet.accel_z != 0.0):
+            accel_val = math.sqrt(
+                packet.accel_x ** 2 + packet.accel_y ** 2 + packet.accel_z ** 2)
+        if accel_val is not None:
+            self.gauges["accel_magnitude"].set_value(accel_val)
 
         t = packet.mission_time
+        spin_val = packet.gyro_spin_rate if packet.gyro_spin_rate != 0.0 else packet.gyro_z
         samples = [
             ("altitude",        "", t, packet.altitude),
             ("temperature",     "", t, packet.temperature),
             ("pressure",        "", t, packet.pressure),
-            ("accel_magnitude", "", t, accel_mag),
-            ("orientation",     "X", t, packet.gyro_x),
-            ("orientation",     "Y", t, packet.gyro_y),
-            ("orientation",     "Z", t, packet.gyro_z),
+            ("orientation",     "", t, spin_val),
         ]
-        if v is not None:
-            samples.append(("velocity", "", t, v))
+        if accel_val is not None:
+            samples.append(("accel_magnitude", "", t, accel_val))
+        if v_final is not None:
+            samples.append(("velocity", "", t, v_final))
 
         for key, trace, x, y in samples:
             sample = (key, trace, x, y, result.tier, packet.state, v)

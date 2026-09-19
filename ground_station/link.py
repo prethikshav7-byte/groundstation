@@ -49,6 +49,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 
 from .codec import CsvCodec, PacketCodec, frame_command
+from .commands import BENCH_COMMANDS
 from .models import (
     HEARTBEAT_TIMEOUT_S, NO_DATA_AFTER_S, ReceiverState, SourceState,
     TelemetryPacket, VehicleID, VehicleLinkState,
@@ -168,7 +169,9 @@ class SerialSource(QThread):
         self._ser = None
         self._state = SourceState.DISCONNECTED
 
-        self._queue: Deque[Tuple[str, float]] = deque()
+        # deque(maxlen=…) makes the bounded-drop-oldest guarantee
+        # structurally atomic rather than accidentally safe (§13.2, §5 review).
+        self._queue: Deque[Tuple[str, float]] = deque(maxlen=self.QUEUE_MAX)
         self._dropped = 0
         self._last_line_at = 0.0
 
@@ -291,10 +294,14 @@ class SerialSource(QThread):
         return out
 
     def _enqueue(self, text: str, now: float) -> None:
-        if len(self._queue) >= self.QUEUE_MAX:
-            self._queue.popleft()
-            self._dropped += 1
+        # With maxlen set, deque.append() atomically evicts from the left
+        # when full — no separate check-then-popleft pair that could race
+        # with drain() on the UI thread.
+        was_full = len(self._queue) == self.QUEUE_MAX
         self._queue.append((text, now))
+        if was_full:
+            # The oldest entry was silently evicted by maxlen; count it.
+            self._dropped += 1
         if len(self._queue) == 1:
             self.lines_available.emit()
 
@@ -397,8 +404,13 @@ class LinkSupervisor(QObject):
             self._command_sequence += 1
             sequence = self._command_sequence
         if self.source is not None:
-            self.source.send_line(
-                frame_command(target, command, sequence) + "\n")
+            if command in BENCH_COMMANDS or command in (
+                "TEST1", "TEST2", "TEST3", "TEST4", "TEST5", "NEXT", "TEST6", "RESET", "START", "CONFIRM"
+            ):
+                self.source.send_line(command + "\n")
+            else:
+                self.source.send_line(
+                    frame_command(target, command, sequence) + "\n")
         return sequence
 
     # ── drain loop ───────────────────────────────────────────────────────

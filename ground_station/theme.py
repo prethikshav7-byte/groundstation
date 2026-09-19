@@ -102,6 +102,39 @@ class ThemeManager:
         """
 
     @classmethod
+    def graph_button_stylesheet(cls) -> str:
+        """Stylesheet for the graph controls toolbar (reset, zoom in, zoom out)."""
+        c = cls._palette
+        return f"""
+            QPushButton {{
+                background-color: {c.BG_INPUT};
+                color: {c.TEXT};
+                border: 1px solid {c.BORDER};
+                border-radius: 4px;
+                padding: 1px 4px;
+                font-family: "Segoe UI", Arial, sans-serif;
+                font-size: 11px;
+                font-weight: bold;
+                min-width: 24px;
+                max-width: 24px;
+                min-height: 22px;
+                max-height: 22px;
+            }}
+            QPushButton:hover {{
+                background-color: {c.BG_CARD_HOVER};
+                border-color: {c.CYAN};
+                color: {c.CYAN};
+            }}
+            QPushButton:pressed {{
+                background-color: {c.BG_CARD};
+            }}
+            QPushButton:disabled {{
+                color: {c.TEXT_MUTED};
+                border-color: {c.BORDER};
+            }}
+        """
+
+    @classmethod
     def main_stylesheet(cls) -> str:
         """Global Qt stylesheet for the entire application."""
         c = cls._palette

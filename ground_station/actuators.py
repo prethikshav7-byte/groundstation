@@ -57,7 +57,7 @@ ACTUATORS: Tuple[ActuatorSpec, ...] = (
     ActuatorSpec("ACT_DOOR", "Rocket door", "PCA9685", 0, 0.0, 360.0, 180.0),
     ActuatorSpec("ACT_DEPLOY", "Payload deploy", "PCA9685", 1, 0.0, 360.0,
                  180.0, destructive=True),
-    ActuatorSpec("ACT_SEPARATE", "Canister separation", "PCA9685", 2, 0.0,
+    ActuatorSpec("ACT_SEPARATE", "Separation", "PCA9685", 2, 0.0,
                  360.0, 180.0, destructive=True),
 )
 
@@ -91,6 +91,7 @@ class Actuator:
         #: What the vehicle last echoed back. None until it does.
         self.actual: Optional[float] = None
         self.last_command_at: Optional[float] = None
+        self.locked: bool = True
 
     # ── position ─────────────────────────────────────────────────────────
 
@@ -110,6 +111,7 @@ class Actuator:
             return False
         return abs(self.actual - self.spec.home) <= HOME_TOLERANCE_DEG
 
+    @property
     def remaining_travel(self) -> Tuple[Optional[float], Optional[float]]:
         """(down, up) degrees available from the current actual position.
 
@@ -169,6 +171,7 @@ class Actuator:
         """Position echoed back by the vehicle (§10.1)."""
         self.actual = actual
 
+    @property
     def commanded_matches_actual(self) -> Optional[bool]:
         """None while either is unknown. False is a real signal — the
         servo did not reach where it was told to go."""

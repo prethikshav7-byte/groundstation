@@ -67,7 +67,7 @@ VELOCITY = AxisSpec(
     "velocity", "Velocity", "m/s", -50.0, 200.0, 2.0,
     "~150–200 m/s burnout; −5 to −15 m/s under chute; −50 margin for "
     "ballistic fallback",
-    derived=True,
+    derived=False,
 )
 DESCENT_RATE = AxisSpec(
     # §6.3 — same computation as VELOCITY, different label, per-vehicle
@@ -76,20 +76,20 @@ DESCENT_RATE = AxisSpec(
     # depend on flight phase.
     "velocity", "Descent Rate", "m/s", -50.0, 200.0, 2.0,
     "identical computation to Velocity; §6.3 labels it per vehicle",
-    derived=True,
+    derived=False,
 )
 ACCELERATION = AxisSpec(
-    "acceleration", "Acceleration", "g", -16.0, 16.0, 0.5,
+    "acceleration", "Acceleration", "m/s²", -16.0, 16.0, 0.5,
     "ADXL345 at ±16 g (confirmed)",
 )
 ACCEL_MAGNITUDE = AxisSpec(
-    "accel_magnitude", "Accel Magnitude", "g", 0.0, 30.0, 0.2,
+    "accel_magnitude", "Accel Magnitude", "m/s²", 0.0, 30.0, 0.2,
     "||a|| = sqrt(ax²+ay²+az²); max is sqrt(3)×16 ≈ 27.7 g; 0 floor (magnitude)",
     hard_floor=True,
 )
 PRESSURE = AxisSpec(
-    "pressure", "Pressure", "Pa", 80000.0, 103000.0, 500.0,
-    "sea level ~95–105 kPa; ~89.9 kPa at 1 km standard atmosphere",
+    "pressure", "Pressure", "Pa", 90000.0, 140000.0, 500.0,
+    "0.9–1.4 bar (90–140 kPa); covers sea level to above-ambient range",
 )
 TEMPERATURE = AxisSpec(
     "temperature", "Temperature", "°C", -20.0, 60.0, 1.0,
@@ -100,7 +100,7 @@ BATTERY = AxisSpec(
     "2S LiPo (confirmed)",
 )
 ORIENTATION = AxisSpec(
-    "orientation", "Orientation", "deg/s", -2000.0, 2000.0, 10.0,
+    "orientation", "Gyro Spin Rate", "deg/s", -2000.0, 2000.0, 10.0,
     "BNO055 gyro full scale",
 )
 AEROSOL = AxisSpec(

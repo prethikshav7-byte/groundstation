@@ -295,21 +295,28 @@ class ExperimentPage(QWidget):
     def _build(self) -> None:
         c = ThemeManager.C()
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(10)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(10)
 
         head = QLabel("CanSat Experiment")
         head.setFont(QFont("monospace", 13, QFont.Weight.Bold))
         head.setStyleSheet(f"color: {c.CYAN};")
-        outer.addWidget(head)
+        lay.addWidget(head)
 
         # ── retrieval half ───────────────────────────────────────────────
         self.retrieval = RetrievalPanel()
         self.retrieval.file_retrieved.connect(self.load_file)
-        outer.addWidget(self.retrieval)
+        lay.addWidget(self.retrieval)
 
         # ── analysis half (§11.8) ────────────────────────────────────────
-        outer.addWidget(self._file_panel())
+        lay.addWidget(self._file_panel())
 
         split = QSplitter(Qt.Orientation.Horizontal)
 
@@ -335,7 +342,10 @@ class ExperimentPage(QWidget):
         split.addWidget(self._report_panel())
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 1)
-        outer.addWidget(split, stretch=1)
+        lay.addWidget(split, stretch=1)
+
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
 
     def _file_panel(self) -> QWidget:
         c = ThemeManager.C()

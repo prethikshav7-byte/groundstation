@@ -30,8 +30,8 @@ from typing import Dict, List, Optional
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
+    QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from ..actuators import (
@@ -39,10 +39,12 @@ from ..actuators import (
     CALIBRATIONS, CalibrationOutcome, CalibrationRun,
 )
 from ..commands import (
-    COMMANDS, CommandCentre, CommandRecord, CommandStatus, Guard,
+    BENCH_COMMANDS, COMMANDS, CommandCentre, CommandRecord, CommandStatus, Guard,
     ModeValue, VehicleModes, check_guard,
 )
-from ..models import FlightState, GROUND_STATES, VehicleID, VehicleLinkState
+from ..models import (
+    FlightState, GROUND_STATES, RocketSafetyState, VehicleID, VehicleLinkState,
+)
 from ..theme import ThemeManager
 
 
@@ -96,12 +98,11 @@ def _heading(text: str) -> QLabel:
 class ActuatorPanel(QWidget):
     """Commanded vs actual, travel, and the move controls."""
 
-    move_requested = pyqtSignal(str, float)      # actuator id, delta
-
-    #: §10.1.1 — ±180° is reachable only from home, so it is offered only
-    #: from home. The smaller steps are always available and are clamped
-    #: with a visible report if they run into a stop.
-    STEPS = (-180.0, -90.0, -45.0, 45.0, 90.0, 180.0)
+    move_requested = pyqtSignal(str, float)        # actuator id, delta
+    send_command_requested = pyqtSignal(str, str) # actuator id, command
+    lock_requested = pyqtSignal(str)              # actuator id
+    unlock_requested = pyqtSignal(str)            # actuator id
+    angle_requested = pyqtSignal(str, int)        # actuator id, angle
 
     def __init__(self, spec: ActuatorSpec, actuator: Actuator,
                  arming: ArmingCentre, parent=None):
@@ -110,7 +111,8 @@ class ActuatorPanel(QWidget):
         self.actuator = actuator
         self.arming = arming
         self._enabled = False
-        self._buttons: Dict[float, QPushButton] = {}
+        self._last_command_sent: Optional[str] = None
+        self._angle_buttons: Dict[int, QPushButton] = {}
         self._build()
 
     def _build(self) -> None:
@@ -154,13 +156,45 @@ class ActuatorPanel(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(4)
-        for delta in self.STEPS:
-            b = QPushButton(f"{delta:+.0f}°")
-            b.setFont(QFont("monospace", 8))
+
+        # [ Lock ] and [ Unlock ]
+        self._lock_btn = QPushButton("Lock")
+        self._lock_btn.setFont(QFont("monospace", 8, QFont.Weight.Bold))
+        self._lock_btn.setStyleSheet(_btn_css(c.AMBER))
+        self._lock_btn.setToolTip(f"Lock {self.spec.mechanism.lower()} (0° safe position)")
+        self._lock_btn.clicked.connect(self._on_lock_clicked)
+        row.addWidget(self._lock_btn)
+
+        self._unlock_btn = QPushButton("Unlock")
+        self._unlock_btn.setFont(QFont("monospace", 8, QFont.Weight.Bold))
+        self._unlock_btn.setStyleSheet(_btn_css(c.CYAN))
+        self._unlock_btn.setToolTip(f"Unlock {self.spec.mechanism.lower()} (not in current firmware protocol)")
+        self._unlock_btn.clicked.connect(self._on_unlock_clicked)
+        row.addWidget(self._unlock_btn)
+
+        # [ 30° ] [ 60° ] [ 90° ]
+        self._angle_buttons = {}
+        for angle in (30, 60, 90):
+            b = QPushButton(f"{angle}°")
+            b.setFont(QFont("monospace", 8, QFont.Weight.Bold))
             b.setStyleSheet(_btn_css(c.TEXT))
-            b.clicked.connect(lambda _c, d=delta: self._request(d))
-            self._buttons[delta] = b
+            b.setToolTip(f"Command {self.spec.mechanism.lower()} to {angle}°")
+            b.clicked.connect(lambda _c, a=angle: self._on_angle_clicked(a))
+            self._angle_buttons[angle] = b
             row.addWidget(b)
+
+        row.addStretch()
+
+        cmd_map = {"ACT_DOOR": "TEST1", "ACT_DEPLOY": "TEST2", "ACT_SEPARATE": "TEST3"}
+        cmd_name = cmd_map.get(self.spec.id, "TEST1")
+
+        self._send_btn = QPushButton("Send")
+        self._send_btn.setFont(QFont("monospace", 8, QFont.Weight.Bold))
+        self._send_btn.setStyleSheet(_btn_css(c.CYAN))
+        self._send_btn.setToolTip(f"Transmit {cmd_name} over serial uplink")
+        self._send_btn.clicked.connect(self._on_send_clicked)
+        row.addWidget(self._send_btn)
+
         lay.addLayout(row)
 
         self._note = QLabel("")
@@ -168,15 +202,6 @@ class ActuatorPanel(QWidget):
         self._note.setStyleSheet(f"color: {c.AMBER};")
         self._note.setWordWrap(True)
         lay.addWidget(self._note)
-
-        if self.spec.destructive:
-            self._arm = QPushButton("Arm")
-            self._arm.setFont(QFont("monospace", 9, QFont.Weight.Bold))
-            self._arm.setStyleSheet(_btn_css(c.RED))
-            self._arm.clicked.connect(self._toggle_arm)
-            lay.addWidget(self._arm)
-        else:
-            self._arm = None
 
     def _value_row(self, grid: QGridLayout, row: int, label: str) -> QLabel:
         c = ThemeManager.C()
@@ -192,42 +217,50 @@ class ActuatorPanel(QWidget):
 
     # ── actions ──────────────────────────────────────────────────────────
 
-    def _request(self, delta: float) -> None:
-        # §10.6 — arm check comes FIRST for destructive controls.  Running
-        # evaluate() before the gate means an unarmed control with no travel
-        # left shows a clamp message instead of "arm first", which hides the
-        # safety requirement behind an unrelated constraint.
-        if self.spec.destructive:
-            if not self.arming.is_armed(self.spec.id):
-                self._note.setText("Arm this control before commanding a move.")
-                return
+    def _on_lock_clicked(self) -> None:
+        self.actuator.locked = True
+        self.actuator.note_commanded(0.0)
+        cmd_map = {"ACT_DOOR": "LOCK:DOOR", "ACT_DEPLOY": "LOCK:CANSAT", "ACT_SEPARATE": "LOCK:SEPARATION"}
+        cmd = cmd_map.get(self.spec.id, "LOCK:DOOR")
+        self.set_last_command(cmd)
+        self.lock_requested.emit(self.spec.id)
 
-        result = self.actuator.evaluate(delta)
-        # §10.1.1 — a clamped move is reported, never silent, never
-        # wrapping.  Shown here whether or not the move then proceeds.
-        self._note.setText(result.message)
+    def _on_unlock_clicked(self) -> None:
+        self.actuator.locked = False
+        self._note.setText("Unlock requested: No UNLOCK command in current firmware protocol.")
+        self.unlock_requested.emit(self.spec.id)
+        self.refresh()
 
-        if result.delta_applied == 0.0:
-            return
+    def _on_angle_clicked(self, angle: int) -> None:
+        self.actuator.locked = False
+        self.actuator.note_commanded(float(angle))
+        cmd_prefix = {"ACT_DOOR": "DOOR", "ACT_DEPLOY": "CANSAT", "ACT_SEPARATE": "SEPARATION"}.get(self.spec.id, "DOOR")
+        cmd = f"{cmd_prefix}:{angle}"
+        self.set_last_command(cmd)
+        self.angle_requested.emit(self.spec.id, angle)
 
-        if self.spec.destructive:
-            if not self.arming.fire(self.spec.id):
-                return
-        self.move_requested.emit(self.spec.id, result.delta_applied)
-
-    def _toggle_arm(self) -> None:
-        if self.arming.is_armed(self.spec.id):
-            self.arming.disarm()
+    def _on_send_clicked(self) -> None:
+        cmd_prefix = {"ACT_DOOR": "DOOR", "ACT_DEPLOY": "CANSAT", "ACT_SEPARATE": "SEPARATION"}.get(self.spec.id, "DOOR")
+        if self.actuator.commanded is not None and int(self.actuator.commanded) in (30, 60, 90):
+            cmd = f"{cmd_prefix}:{int(self.actuator.commanded)}"
+        elif self._last_command_sent and ":" in self._last_command_sent and not self._last_command_sent.startswith("LOCK:"):
+            cmd = self._last_command_sent
         else:
-            # §10.6 — arming one destructive control disarms any other.
-            # ArmingCentre holds a single slot, so this is automatic.
-            self.arming.arm(self.spec.id)
+            cmd_map = {"ACT_DOOR": "TEST1", "ACT_DEPLOY": "TEST2", "ACT_SEPARATE": "TEST3"}
+            cmd = cmd_map.get(self.spec.id, "TEST1")
+        self.set_last_command(cmd)
+        self.send_command_requested.emit(self.spec.id, cmd)
+
+    def set_last_command(self, command: str) -> None:
+        self._last_command_sent = command
+        self.actuator.last_command_at = time.monotonic()
         self.refresh()
 
     # ── refresh ──────────────────────────────────────────────────────────
 
-    def set_enabled_by_guard(self, enabled: bool, reason: str = "") -> None:
+    def set_enabled_by_guard(self, enabled: bool, reason: str = "", rocket_selected: bool = True) -> None:
         self._enabled = enabled
+        self._rocket_selected = rocket_selected
         if not enabled and reason:
             self._note.setText(reason)
         self.refresh()
@@ -237,48 +270,35 @@ class ActuatorPanel(QWidget):
         a = self.actuator
 
         self._commanded.setText(
-            "—" if a.commanded is None else f"{a.commanded:.1f}°")
+            "—" if a.commanded is None else f"{a.commanded:.0f}°" if a.commanded.is_integer() else f"{a.commanded:.1f}°")
         # §10.1 — "Never display commanded position as if it were actual."
         # An em dash here means the vehicle has not reported a position,
         # which is a different fact from being at 180°.
         self._actual.setText(
-            "not reported" if a.position is None else f"{a.position:.1f}°")
+            "not reported" if a.position is None else f"{a.position:.0f}°" if a.position.is_integer() else f"{a.position:.1f}°")
 
-        down, up = a.remaining_travel()
+        down, up = a.remaining_travel
         self._travel.setText(
             "—" if down is None else f"{down:.0f}° down   {up:.0f}° up")
-        self._last.setText(
-            "—" if a.last_command_at is None
-            else time.strftime("%H:%M:%S", time.localtime(a.last_command_at)))
+        if self._last_command_sent:
+            self._last.setText(self._last_command_sent)
+        elif a.last_command_at is not None:
+            self._last.setText(time.strftime("%H:%M:%S", time.localtime(a.last_command_at)))
+        else:
+            self._last.setText("—")
 
-        agree = a.commanded_matches_actual()
+        agree = a.commanded_matches_actual
         self._mismatch.setVisible(agree is False)
         if agree is False:
             self._mismatch.setText(
                 "COMMANDED AND ACTUAL DISAGREE — mechanism may be jammed")
 
-        for delta, b in self._buttons.items():
-            allowed = self._enabled
-            if abs(delta) >= 180.0:
-                # §10.1.1 — disabled unless at home, rather than offered
-                # and then clamped. "A control that is nearly always
-                # impossible trains operators to ignore clamp warnings."
-                allowed = allowed and a.at_home
-                b.setToolTip("" if a.at_home else
-                             "±180° is reachable only from the home position")
-            b.setEnabled(allowed)
-
-        if self._arm is not None:
-            armed = self.arming.is_armed(self.spec.id)
-            remaining = self.arming.seconds_remaining()
-            self._arm.setEnabled(self._enabled)
-            self._arm.setText(
-                f"ARMED — fire within {remaining:.0f} s   (click to disarm)"
-                if armed else "Arm")
-            # §10.6 — filled red background when armed so the state is
-            # unmistakable at a glance; reverts to dim style on disarm.
-            self._arm.setStyleSheet(_armed_btn_css() if armed
-                                    else _btn_css(c.TEXT_DIM))
+        rocket_selected = getattr(self, '_rocket_selected', True)
+        self._lock_btn.setEnabled(rocket_selected)
+        self._unlock_btn.setEnabled(rocket_selected)
+        for b in self._angle_buttons.values():
+            b.setEnabled(rocket_selected)
+        self._send_btn.setEnabled(rocket_selected)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -361,8 +381,193 @@ class ModePanel(QWidget):
                 ModeValue.UNCONFIRMED: c.RED,
                 ModeValue.UNKNOWN: c.TEXT_MUTED,
             }.get(value, c.GREEN)
-            label.setText(value.value if hasattr(value, "value") else str(value))
-            label.setStyleSheet(f"color: {colour};")
+# ─────────────────────────────────────────────────────────────────────────────
+#  Sequence & Bench Controls
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SequenceControlPanel(QWidget):
+    """Real-time bench test & sequence controls for multi-servo hardware."""
+
+    command_requested = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._mode = "IDLE"
+        self._step = 0
+        self._total_steps = 3
+        self._step_text = "0 / 3"
+        self._last_cmd = "—"
+        self._status = "Ready"
+        self._buttons: List[QPushButton] = []
+        self._enabled = True
+        self._build()
+
+    def _build(self) -> None:
+        c = ThemeManager.C()
+        self.setStyleSheet(
+            f"background-color: {c.BG_CARD}; border: 1px solid {c.BORDER}; "
+            f"border-radius: 6px;")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(8)
+        lay.addWidget(_heading("Sequence Controls"))
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(2)
+
+        self._mode_val = self._value_row(grid, 0, "Sequence mode")
+        self._step_val = self._value_row(grid, 1, "Current step")
+        self._last_val = self._value_row(grid, 2, "Last command")
+        self._status_val = self._value_row(grid, 3, "Status")
+        lay.addLayout(grid)
+
+        # Row 1: LOCK ALL, RESET
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
+
+        self._btn_lock_all = QPushButton("LOCK ALL")
+        self._btn_lock_all.setFont(QFont("monospace", 8, QFont.Weight.Bold))
+        self._btn_lock_all.setStyleSheet(_btn_css(c.AMBER))
+        self._btn_lock_all.setToolTip("Transmit LOCK:ALL: Lock all servos to safe position (0°)")
+        self._btn_lock_all.clicked.connect(self._on_lock_all_clicked)
+        self._buttons.append(self._btn_lock_all)
+        row1.addWidget(self._btn_lock_all)
+
+        self._btn_reset = QPushButton("RESET")
+        self._btn_reset.setFont(QFont("monospace", 8, QFont.Weight.Bold))
+        self._btn_reset.setStyleSheet(_btn_css(c.RED))
+        self._btn_reset.setToolTip("Transmit RESET: Reset and lock all servos to 0°")
+        self._btn_reset.clicked.connect(self._on_reset_clicked)
+        self._buttons.append(self._btn_reset)
+        row1.addWidget(self._btn_reset)
+
+        lay.addLayout(row1)
+
+        # Row 2: MANUAL SEQUENCE, NEXT SEQUENCE STEP, FULL SEQUENCE
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+
+        self._btn_manual_seq = QPushButton("MANUAL SEQUENCE")
+        self._btn_manual_seq.setFont(QFont("monospace", 8, QFont.Weight.Bold))
+        self._btn_manual_seq.setStyleSheet(_btn_css(c.CYAN))
+        self._btn_manual_seq.setToolTip("Transmit TEST5: Start manual sequence (Step 1: Door)")
+        self._btn_manual_seq.clicked.connect(self._on_manual_seq_clicked)
+        self._buttons.append(self._btn_manual_seq)
+        row2.addWidget(self._btn_manual_seq)
+
+        self._btn_next_step = QPushButton("NEXT SEQUENCE STEP")
+        self._btn_next_step.setFont(QFont("monospace", 8, QFont.Weight.Bold))
+        self._btn_next_step.setStyleSheet(_btn_css(c.CYAN))
+        self._btn_next_step.setToolTip("Transmit NEXT: Advance manual sequence to next step")
+        self._btn_next_step.clicked.connect(self._on_next_step_clicked)
+        self._buttons.append(self._btn_next_step)
+        row2.addWidget(self._btn_next_step)
+
+        self._btn_full_seq = QPushButton("FULL SEQUENCE")
+        self._btn_full_seq.setFont(QFont("monospace", 8, QFont.Weight.Bold))
+        self._btn_full_seq.setStyleSheet(_btn_css(c.GREEN))
+        self._btn_full_seq.setToolTip("Transmit TEST6: Run full automatic 3-servo sequence")
+        self._btn_full_seq.clicked.connect(self._on_full_seq_clicked)
+        self._buttons.append(self._btn_full_seq)
+        row2.addWidget(self._btn_full_seq)
+
+        lay.addLayout(row2)
+        self.refresh()
+
+    def _value_row(self, grid: QGridLayout, row: int, label: str) -> QLabel:
+        c = ThemeManager.C()
+        cap = QLabel(label)
+        cap.setFont(QFont("monospace", 8))
+        cap.setStyleSheet(f"color: {c.TEXT_DIM};")
+        val = QLabel("—")
+        val.setFont(QFont("monospace", 9, QFont.Weight.Bold))
+        val.setStyleSheet(f"color: {c.TEXT};")
+        grid.addWidget(cap, row, 0)
+        grid.addWidget(val, row, 1)
+        return val
+
+    def _on_btn_clicked(self, command: str) -> None:
+        self.command_requested.emit(command)
+
+    def _on_lock_all_clicked(self) -> None:
+        self.command_requested.emit("LOCK:ALL")
+
+    def _on_reset_clicked(self) -> None:
+        self.command_requested.emit("RESET")
+
+    def _on_manual_seq_clicked(self) -> None:
+        self.command_requested.emit("TEST5")
+
+    def _on_next_step_clicked(self) -> None:
+        self.command_requested.emit("NEXT")
+
+    def _on_full_seq_clicked(self) -> None:
+        self.command_requested.emit("TEST6")
+
+    def note_command_sent(self, command: str) -> None:
+        self._last_cmd = command
+        if command == "TEST1":
+            self._mode = "INDIVIDUAL TEST"
+            self._step_text = "Door Test"
+            self._status = "Sent: TEST1 (Door Test)"
+        elif command == "TEST2":
+            self._mode = "INDIVIDUAL TEST"
+            self._step_text = "CanSat Test"
+            self._status = "Sent: TEST2 (CanSat Test)"
+        elif command == "TEST3":
+            self._mode = "INDIVIDUAL TEST"
+            self._step_text = "Separation Test"
+            self._status = "Sent: TEST3 (Separation Test)"
+        elif command in ("LOCK:ALL", "TEST4"):
+            self._mode = "LOCKED"
+            self._step = 0
+            self._step_text = "0 / 3 (All Locked)"
+            self._status = "Sent: LOCK:ALL (Lock All)"
+        elif command == "TEST5":
+            self._mode = "MANUAL"
+            self._step = 1
+            self._step_text = "1 / 3 (Step 1: Door)"
+            self._status = "Sent: TEST5 (Manual Step 1: Door)"
+        elif command == "NEXT":
+            if self._step == 1:
+                self._step = 2
+                self._step_text = "2 / 3 (Step 2: CanSat)"
+            elif self._step == 2:
+                self._step = 3
+                self._step_text = "3 / 3 (Step 3: Separation)"
+            elif self._step >= 3:
+                self._step_text = "3 / 3 (Complete)"
+            else:
+                self._step = 1
+                self._step_text = "1 / 3 (Step 1: Door)"
+            self._status = f"Sent: NEXT ({self._step_text})"
+        elif command == "TEST6":
+            self._mode = "FULL SEQUENCE"
+            self._step = 3
+            self._step_text = "3 / 3 (Full Auto Run)"
+            self._status = "Sent: TEST6 (Full Sequence)"
+        elif command == "RESET":
+            self._mode = "RESET / IDLE"
+            self._step = 0
+            self._step_text = "0 / 3 (Safe / Reset)"
+            self._status = "Sent: RESET (System Reset)"
+        self.refresh()
+
+    def set_enabled(self, enabled: bool) -> None:
+        self._enabled = enabled
+        for b in self._buttons:
+            b.setEnabled(enabled)
+
+    def refresh(self) -> None:
+        c = ThemeManager.C()
+        self._mode_val.setText(self._mode)
+        step_display = getattr(self, "_step_text", "0 / 3")
+        self._step_val.setText(step_display)
+        self._last_val.setText(self._last_cmd)
+        self._status_val.setText(self._status)
+        colour = c.GREEN if ("Sent" in self._status or self._status == "Ready") else c.AMBER
+        self._status_val.setStyleSheet(f"color: {colour};")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -517,7 +722,7 @@ class CommandLogPanel(QWidget):
         w._time.setText(time.strftime("%H:%M:%S",
                                       time.localtime(record.sent_at)))
         w._time.setStyleSheet(f"color: {c.TEXT_MUTED};")
-        w._text.setText(f"{record.target.value}  {record.command}")
+        w._text.setText(record.command if record.command in BENCH_COMMANDS else f"{record.target.value}  {record.command}")
         w._text.setStyleSheet(f"color: {c.TEXT};")
 
         # §10.7 — "An unacknowledged command must look visibly different
@@ -530,11 +735,11 @@ class CommandLogPanel(QWidget):
             CommandStatus.TIMED_OUT: c.RED,
             CommandStatus.REJECTED: c.RED,
         }.get(record.status, c.TEXT_DIM)
-        w._status.setText(record.status.value)
+        w._status.setText("SENT" if record.command in BENCH_COMMANDS else record.status.value)
         w._status.setStyleSheet(f"color: {colour};")
         # §10.7 — retry is operator-initiated only. The button is the only
         # path to a resend; nothing in this file calls resend() on a timer.
-        w._resend.setVisible(record.unacknowledged)
+        w._resend.setVisible(record.unacknowledged and record.command not in BENCH_COMMANDS)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -543,6 +748,35 @@ class CommandLogPanel(QWidget):
 
 class CommandPage(QWidget):
     """§10 — the whole dashboard for one vehicle at a time."""
+
+    notice = pyqtSignal(str)
+
+    @staticmethod
+    def _command_popup_text(command: str) -> str:
+        names = {
+            "DOOR:30": "Door 30° command sent",
+            "DOOR:60": "Door 60° command sent",
+            "DOOR:90": "Door 90° command sent",
+            "LOCK:DOOR": "Door locked (0°)",
+            "CANSAT:30": "CanSat 30° command sent",
+            "CANSAT:60": "CanSat 60° command sent",
+            "CANSAT:90": "CanSat 90° command sent",
+            "LOCK:CANSAT": "CanSat locked (0°)",
+            "SEPARATION:30": "Separation 30° command sent",
+            "SEPARATION:60": "Separation 60° command sent",
+            "SEPARATION:90": "Separation 90° command sent",
+            "LOCK:SEPARATION": "Separation locked (0°)",
+            "LOCK:ALL": "Lock All command sent",
+            "TEST1": "Door test command sent",
+            "TEST2": "CanSat test command sent",
+            "TEST3": "Separation test command sent",
+            "TEST4": "Lock All command sent",
+            "RESET": "Reset command sent",
+            "TEST5": "Manual sequence command sent",
+            "NEXT": "Next sequence step command sent",
+            "TEST6": "Full sequence command sent",
+        }
+        return names.get(command, f"{command} command sent")
 
     def __init__(self, centre: CommandCentre, simulator_mode: bool = False,
                  parent=None):
@@ -626,8 +860,16 @@ class CommandPage(QWidget):
         for spec in ACTUATORS:
             p = ActuatorPanel(spec, self.actuators[spec.id], self.arming)
             p.move_requested.connect(self._send_move)
+            p.send_command_requested.connect(self._send_actuator_command)
+            p.lock_requested.connect(self._on_actuator_lock)
+            p.unlock_requested.connect(self._on_actuator_unlock)
+            p.angle_requested.connect(self._on_actuator_angle)
             self.actuator_panels[spec.id] = p
             lay.addWidget(p)
+
+        self.sequence_panel = SequenceControlPanel()
+        self.sequence_panel.command_requested.connect(self._send_sequence_command)
+        lay.addWidget(self.sequence_panel)
 
         self.calibration_panel = CalibrationPanel(self.calibration[self.vehicle])
         self.calibration_panel.command_requested.connect(self._send_guarded)
@@ -655,6 +897,20 @@ class CommandPage(QWidget):
             self._vehicle_buttons[vid] = b
             row.addWidget(b)
         self._vehicle_buttons[VehicleID.ROCKET].setChecked(True)
+
+        # Rocket safety state control (ARM / DISARM)
+        self._rocket_arm_btn = QPushButton("Arm")
+        self._rocket_arm_btn.setFont(QFont("monospace", 9, QFont.Weight.Bold))
+        self._rocket_arm_btn.setStyleSheet(_btn_css(c.RED))
+        self._rocket_arm_btn.setToolTip("Set Rocket safety state: ARMED (flight-ready)")
+        self._rocket_arm_btn.clicked.connect(self._toggle_rocket_arm)
+        row.addWidget(self._rocket_arm_btn)
+
+        self._rocket_safety_label = QLabel("UNARMED")
+        self._rocket_safety_label.setFont(QFont("monospace", 9, QFont.Weight.Bold))
+        self._rocket_safety_label.setStyleSheet(f"color: {c.GREEN}; padding: 0 4px;")
+        row.addWidget(self._rocket_safety_label)
+
         row.addStretch()
 
         self._guard_note = QLabel("")
@@ -663,11 +919,30 @@ class CommandPage(QWidget):
         row.addWidget(self._guard_note)
         return row
 
+    @property
+    def rocket_safety_state(self) -> RocketSafetyState:
+        return self.centre.rocket_safety_state
+
+    def arm_rocket(self) -> None:
+        self.centre.arm_rocket()
+        self.refresh()
+
+    def disarm_rocket(self) -> None:
+        self.centre.disarm_rocket()
+        self.refresh()
+
+    def _toggle_rocket_arm(self) -> None:
+        if self.centre.is_rocket_armed():
+            self.disarm_rocket()
+        else:
+            self.arm_rocket()
+
     def _general_commands(self) -> QWidget:
         c = ThemeManager.C()
         w = _card()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(8)
         lay.addWidget(_heading("Commands"))
 
         grid = QGridLayout()
@@ -686,6 +961,96 @@ class CommandPage(QWidget):
             grid.addWidget(b, i // 2, i % 2)
         lay.addLayout(grid)
         return w
+
+    def _on_actuator_angle(self, actuator_id: str, angle: int) -> None:
+        cmd_prefix = {
+            "ACT_DOOR": "DOOR",
+            "ACT_DEPLOY": "CANSAT",
+            "ACT_SEPARATE": "SEPARATION",
+        }.get(actuator_id, "DOOR")
+        cmd = f"{cmd_prefix}:{angle}"
+        panel = self.actuator_panels.get(actuator_id)
+        if panel is not None:
+            panel.actuator.note_commanded(float(angle))
+            panel.set_last_command(cmd)
+        self.centre.send(VehicleID.ROCKET, cmd)
+        msg = self._command_popup_text(cmd)
+        self.notice.emit(msg)
+        self.refresh()
+
+    def _on_actuator_lock(self, actuator_id: str) -> None:
+        cmd_map = {
+            "ACT_DOOR": "LOCK:DOOR",
+            "ACT_DEPLOY": "LOCK:CANSAT",
+            "ACT_SEPARATE": "LOCK:SEPARATION",
+        }
+        cmd = cmd_map.get(actuator_id, "LOCK:DOOR")
+        panel = self.actuator_panels.get(actuator_id)
+        if panel is not None:
+            panel.actuator.note_commanded(0.0)
+            panel.set_last_command(cmd)
+        self.centre.send(VehicleID.ROCKET, cmd)
+        msg = self._command_popup_text(cmd)
+        self.notice.emit(msg)
+        self.refresh()
+
+    def _on_actuator_unlock(self, actuator_id: str) -> None:
+        name_map = {
+            "ACT_DOOR": "Rocket Door",
+            "ACT_DEPLOY": "Payload Deploy",
+            "ACT_SEPARATE": "Separation",
+        }
+        name = name_map.get(actuator_id, "Actuator")
+        self.notice.emit(f"{name} unlock: not in firmware protocol")
+        self.refresh()
+
+    def _send_actuator_command(self, actuator_id: str, command: str) -> None:
+        panel = self.actuator_panels.get(actuator_id)
+        if panel is not None:
+            panel.set_last_command(command)
+        self.sequence_panel.note_command_sent(command)
+        self.centre.send(VehicleID.ROCKET, command)
+        msg = self._command_popup_text(command)
+        self.notice.emit(msg)
+        self.refresh()
+
+    def _send_sequence_command(self, command: str) -> None:
+        self.sequence_panel.note_command_sent(command)
+        if command in ("LOCK:ALL", "TEST4"):
+            for p in self.actuator_panels.values():
+                p.actuator.note_commanded(0.0)
+                p.set_last_command("LOCK:ALL")
+        elif command == "RESET":
+            for p in self.actuator_panels.values():
+                p.actuator.note_commanded(0.0)
+                p.set_last_command("RESET")
+        elif command == "TEST1":
+            p = self.actuator_panels.get("ACT_DOOR")
+            if p: p.set_last_command("TEST1")
+        elif command == "TEST2":
+            p = self.actuator_panels.get("ACT_DEPLOY")
+            if p: p.set_last_command("TEST2")
+        elif command == "TEST3":
+            p = self.actuator_panels.get("ACT_SEPARATE")
+            if p: p.set_last_command("TEST3")
+        elif command == "TEST5":
+            p = self.actuator_panels.get("ACT_DOOR")
+            if p: p.set_last_command("TEST5")
+        elif command == "NEXT":
+            if self.sequence_panel._step == 2:
+                p = self.actuator_panels.get("ACT_DEPLOY")
+                if p: p.set_last_command("NEXT")
+            elif self.sequence_panel._step >= 3:
+                p = self.actuator_panels.get("ACT_SEPARATE")
+                if p: p.set_last_command("NEXT")
+        elif command == "TEST6":
+            for p in self.actuator_panels.values():
+                p.set_last_command("TEST6")
+
+        self.centre.send(VehicleID.ROCKET, command)
+        msg = self._command_popup_text(command)
+        self.notice.emit(msg)
+        self.refresh()
 
     # ── sending ──────────────────────────────────────────────────────────
 
@@ -790,10 +1155,29 @@ class CommandPage(QWidget):
         # disabled rather than hidden when CanSat is selected, so the
         # operator can see they exist and why they are unavailable.
         rocket_selected = self.vehicle is VehicleID.ROCKET
+        self._rocket_arm_btn.setVisible(rocket_selected)
+        self._rocket_safety_label.setVisible(rocket_selected)
+        if rocket_selected:
+            c = ThemeManager.C()
+            armed = self.centre.is_rocket_armed()
+            self._rocket_arm_btn.setText("Disarm" if armed else "Arm")
+            self._rocket_arm_btn.setStyleSheet(
+                _armed_btn_css() if armed else _btn_css(c.RED))
+            self._rocket_arm_btn.setToolTip(
+                "Disarm Rocket (return to UNARMED development state)" if armed
+                else "Arm Rocket (enter ARMED flight-ready state)")
+            self._rocket_safety_label.setText("ARMED" if armed else "UNARMED")
+            self._rocket_safety_label.setStyleSheet(
+                f"color: {c.RED if armed else c.GREEN}; padding: 0 4px;")
+
         for p in self.actuator_panels.values():
             p.set_enabled_by_guard(
                 rocket_selected and link is not VehicleLinkState.LOST,
-                "" if rocket_selected else "Actuators are on the Rocket.")
+                "" if rocket_selected else "Actuators are on the Rocket.",
+                rocket_selected=rocket_selected)
+
+        self.sequence_panel.set_enabled(rocket_selected)
+        self.sequence_panel.refresh()
 
         self.mode_panel.refresh()
         self.calibration_panel.refresh()

@@ -255,9 +255,9 @@ print("\n§7.5.5 simulator and reconciliation share one physics module")
 import ground_station.simulator.engine as eng
 import ground_station.graphs.reconcile as rec
 check("engine imports the shared profile",
-      "trajectory" in open(eng.__file__).read())
+      "trajectory" in open(eng.__file__, encoding="utf-8").read())
 check("reconcile imports the same module",
-      "from .trajectory import" in open(rec.__file__).read())
+      "from .trajectory import" in open(rec.__file__, encoding="utf-8").read())
 check("apogee consistent with §8 altitude extent",
       900 < profile.altitude_at(profile.time_to_apogee()) < 1300)
 

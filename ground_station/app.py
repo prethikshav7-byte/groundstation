@@ -81,6 +81,13 @@ class GroundStationApp(QMainWindow):
         self.rocket_page = self.pages[VehicleID.ROCKET]
         self.cansat_page = self.pages[VehicleID.CANSAT]
 
+        # Fix 1 / §5.2 — give the backward_transition signal a receiver so
+        # anomalies reach the status bar.  Connected here (once, at
+        # construction) rather than per-packet so there is never a window
+        # where the signal exists but has no handler attached.
+        for page in self.pages.values():
+            page.backward_transition.connect(self._on_notice)
+
         # §1.4 — the CommandCentre's transmit callback is set in
         # connect_supervisor. Until then it is a no-op, so a command
         # cannot escape before there is a link to carry it.
@@ -89,6 +96,7 @@ class GroundStationApp(QMainWindow):
         # §2.5 — ENTER_SIMULATION is disabled while in Simulator Mode; the
         # page needs to know which mode the app launched in.
         self.command_page = CommandPage(self.command_centre, simulator_mode)
+        self.command_page.notice.connect(self._on_notice)
         self.experiment_page = ExperimentPage()
 
         self._build(mode_label)
@@ -193,6 +201,7 @@ class GroundStationApp(QMainWindow):
             supervisor.send_command(target, command, sequence))
 
     _supervisor = None
+    _telemetry_connected: bool = False
 
     def _on_rocket(self, packet: TelemetryPacket, result: IngestResult) -> None:
         self._dispatch(VehicleID.ROCKET, packet, result)
@@ -202,6 +211,10 @@ class GroundStationApp(QMainWindow):
 
     def _dispatch(self, vid: VehicleID, packet: TelemetryPacket,
                   result: IngestResult) -> None:
+        if not self._telemetry_connected:
+            self._telemetry_connected = True
+            self.statusBar().showMessage("PHOENIX telemetry connected", 8000)
+
         self.command_page.set_vehicle_state(vid, packet.state)
         page = self.pages[vid]
         # The vehicle page owns the one derived-velocity estimator for
@@ -220,12 +233,16 @@ class GroundStationApp(QMainWindow):
                 success=stream.packet_success)
 
     def _on_source_state(self, state: SourceState) -> None:
+        if state is SourceState.DISCONNECTED or state is SourceState.LINK_ERROR:
+            self._telemetry_connected = False
         self.overview_page.health.set_source(state)
 
     def _on_receiver_state(self, state: ReceiverState) -> None:
         self.overview_page.health.set_receiver(state)
 
     def _on_vehicle_state(self, vid: VehicleID, state: VehicleLinkState) -> None:
+        if state is VehicleLinkState.LOST:
+            self._telemetry_connected = False
         self.pages[vid].set_link_state(state)
         # §10.8 — controls for a vehicle in LOST state are disabled rather
         # than queued to fire on reconnect.

@@ -135,6 +135,7 @@ class VehicleStream:
         self._last_packet_count: Optional[int] = None
         self._last_mission_time: Optional[float] = None
         self._last_received_at: float = 0.0
+        self._first_received_at: Optional[float] = None
 
         # Rolling window of (expected, received) for §3.7.
         self._window: Deque[Tuple[int, int]] = deque(maxlen=self.SUCCESS_WINDOW)
@@ -289,16 +290,11 @@ class TelemetryDemux:
         self.last_heartbeat: Optional[ReceiverHeartbeat] = None
         self._last_heartbeat_at: float = 0.0
 
-        #: Lines with no recognised prefix. Counted, not logged per line —
-        #: §3.12 says each parser ignores the others' lines rather than
-        #: treating them as malformed.
         self.ignored_lines: int = 0
-        #: §11.5 file-transfer frames, handed to whoever is running a
-        #: transfer. Empty callback in flight; wired up by the Experiment
-        #: dashboard.
         self.on_file_frame: Optional[Callable[[str], None]] = None
-        #: §4.7 one-shot notices, drained by the UI.
         self.notices: List[str] = []
+        self._latest_rssi: Optional[float] = None
+        self._latest_snr: Optional[float] = None
 
     def feed(self, line: str, received_at: Optional[float] = None
              ) -> Optional[IngestResult]:
@@ -319,11 +315,35 @@ class TelemetryDemux:
                 self.on_file_frame(text)
             return None
 
-        if not text.startswith(PREFIX_TELEMETRY + ","):
+        # Parse ground station receiver diagnostic RSSI / SNR lines
+        if text.upper().startswith("RSSI") and ":" in text:
+            self._parse_rssi_line(text)
+            return None
+        if text.upper().startswith("SNR") and ":" in text:
+            self._parse_snr_line(text)
+            return None
+
+        if not (text.startswith(PREFIX_TELEMETRY + ",") or text.startswith("PKT=")):
             self.ignored_lines += 1
             return None
 
         return self._feed_telemetry(text, received_at)
+
+    def _parse_rssi_line(self, text: str) -> None:
+        try:
+            val_part = text.split(":", 1)[1].strip()
+            num_str = val_part.replace("dBm", "").replace("dbm", "").strip()
+            self._latest_rssi = float(num_str)
+        except Exception:
+            pass
+
+    def _parse_snr_line(self, text: str) -> None:
+        try:
+            val_part = text.split(":", 1)[1].strip()
+            num_str = val_part.replace("dB", "").replace("db", "").strip()
+            self._latest_snr = float(num_str)
+        except Exception:
+            pass
 
     # ── internals ────────────────────────────────────────────────────────
 
@@ -354,26 +374,41 @@ class TelemetryDemux:
                     f"(§4.7 — accepted and ignored, reported once per session)"
                 )
 
+        extras = dict(decoded.extras)
+        if self._latest_rssi is not None:
+            extras.setdefault("rssi", f"{self._latest_rssi:.1f}")
+        if self._latest_snr is not None:
+            extras.setdefault("snr", f"{self._latest_snr:.2f}")
+
+        if text.startswith("PKT="):
+            if stream._first_received_at is None:
+                stream._first_received_at = received_at
+            elapsed = round(received_at - stream._first_received_at, 3)
+            decoded.values["mission_time"] = elapsed
+
         packet = TelemetryPacket(
             **decoded.values,
-            extras=decoded.extras,
+            extras=extras,
             received_at=received_at,
             raw=text,
         )
         return stream.ingest(packet)
 
     def _sniff_vehicle(self, text: str) -> Optional[VehicleID]:
-        """Best-effort VEHICLE_ID read from a line that failed to decode.
-
-        Only used to attribute a rejection counter. Never used to build a
-        packet, and a wrong guess costs one mis-attributed reject rather
-        than any displayed value.
-        """
-        try:
-            token = text.split(",")[2].strip().upper()
-            return VehicleID[token]
-        except (IndexError, KeyError):
-            return None
+        """Best-effort VEHICLE_ID read from a line that failed to decode."""
+        if text.startswith("PKT="):
+            return VehicleID.ROCKET
+        parts = [p.strip() for p in text.split(",")]
+        # For 19-field packet ($T at index 0), vehicle is at index 17.
+        # For 21-field packet ($T at index 0), vehicle is at index 2.
+        for idx in (17, 2):
+            if idx < len(parts):
+                token = parts[idx].upper()
+                if token in ("1", "ROCKET"):
+                    return VehicleID.ROCKET
+                elif token in ("2", "CANSAT"):
+                    return VehicleID.CANSAT
+        return None
 
     def _feed_heartbeat(self, text: str, received_at: float) -> None:
         try:
