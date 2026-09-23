@@ -182,6 +182,12 @@ class SimulatedSource(QObject):
         for msg in self.demux.drain_notices():
             self.notice.emit(msg)
 
+    def inject_line(self, line: str, received_at: Optional[float] = None) -> None:
+        """Inject one line directly into the demux pipeline."""
+        if received_at is None:
+            received_at = time.monotonic()
+        self._feed(line)
+
     # ── read-only views, mirroring LinkSupervisor ────────────────────────
 
     @property
@@ -194,6 +200,14 @@ class SimulatedSource(QObject):
     @property
     def source_state(self) -> SourceState:
         return self._source_state
+
+    @property
+    def port_name(self) -> str:
+        return "SIMULATOR"
+
+    @property
+    def baudrate(self) -> int:
+        return 115200
 
     def reset(self) -> None:
         """Restart the simulation from T=0.

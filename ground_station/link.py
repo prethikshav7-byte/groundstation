@@ -201,6 +201,21 @@ class SerialSource(QThread):
     def state(self) -> SourceState:
         return self._state
 
+    @property
+    def port_name(self) -> str:
+        if self._ser is not None and getattr(self._ser, "port", None):
+            return str(self._ser.port)
+        resolved = resolve_stable_id(self.stable_id)
+        if resolved:
+            return resolved
+        if self.device_hint:
+            return self.device_hint
+        if self.stable_id:
+            if self.stable_id.startswith("DEV:"):
+                return self.stable_id[4:]
+            return self.stable_id
+        return "—"
+
     def send_line(self, line: str) -> None:
         """Queue one already-framed line for transmission (§10.5)."""
         self._tx.append(line)
@@ -477,6 +492,25 @@ class LinkSupervisor(QObject):
                     "treat as a ground-side outage until proven otherwise."
                 )
 
+    def inject_line(self, line: str, received_at: Optional[float] = None) -> None:
+        """Inject one raw line directly into the demux pipeline."""
+        if received_at is None:
+            received_at = time.monotonic()
+        self.raw_line.emit(line, received_at)
+        result: Optional[IngestResult] = self.demux.feed(line, received_at)
+        if result is None:
+            return
+        if result.rejected is not None:
+            self.line_rejected.emit(result.rejected)
+            return
+        packet: TelemetryPacket = result.packet
+        if packet.vehicle_id is VehicleID.ROCKET:
+            self.rocket_packet.emit(packet, result)
+        else:
+            self.cansat_packet.emit(packet, result)
+        for msg in self.demux.drain_notices():
+            self.notice.emit(msg)
+
     # ── read-only views for the health strip (§6.5) ──────────────────────
 
     @property
@@ -489,3 +523,11 @@ class LinkSupervisor(QObject):
     @property
     def source_state(self) -> SourceState:
         return self.source.state if self.source else SourceState.DISCONNECTED
+
+    @property
+    def port_name(self) -> str:
+        return self.source.port_name if self.source else "—"
+
+    @property
+    def baudrate(self) -> int:
+        return self.source.baudrate if self.source else 115200

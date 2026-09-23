@@ -35,6 +35,7 @@ from .models import (
 from .parser import IngestResult
 from .commands import CommandCentre
 from .pages.command import CommandPage
+from .pages.com import ComPage
 from .pages.experiment import ExperimentPage
 from .pages.overview import OverviewPage
 from .pages.vehicle import VehiclePage
@@ -98,6 +99,7 @@ class GroundStationApp(QMainWindow):
         self.command_page = CommandPage(self.command_centre, simulator_mode)
         self.command_page.notice.connect(self._on_notice)
         self.experiment_page = ExperimentPage()
+        self.com_page = ComPage()
 
         self._build(mode_label)
 
@@ -121,6 +123,7 @@ class GroundStationApp(QMainWindow):
         self.stack.addWidget(self.cansat_page)
         self.stack.addWidget(self.command_page)
         self.stack.addWidget(self.experiment_page)
+        self.stack.addWidget(self.com_page)
         row.addWidget(self.stack, stretch=1)
 
         self.setCentralWidget(root)
@@ -158,6 +161,7 @@ class GroundStationApp(QMainWindow):
             ("CanSat", 2, True),
             ("Command", 3, True),
             ("CanSat Experiment", 4, True),
+            ("COM", 5, True),
         ]
         for text, index, enabled in entries:
             b = NavButton(text)
@@ -187,6 +191,7 @@ class GroundStationApp(QMainWindow):
         supervisor.line_rejected.connect(self._on_rejected)
         supervisor.notice.connect(self._on_notice)
         self._supervisor = supervisor
+        self.com_page.set_supervisor(supervisor)
         # §1.4 — the only place a transmit path is installed, installed
         # once. Nothing in the app calls send() on a timer; every call
         # originates in a widget's clicked handler.
@@ -224,6 +229,7 @@ class GroundStationApp(QMainWindow):
         # different number for the same instant.
         v = page.receive(packet, result)
         self.overview_page.receive(packet, result, v)
+        self.com_page.receive(packet, result, v)
 
         if self._supervisor is not None:
             stream = self._supervisor.demux.streams[vid]
@@ -236,6 +242,7 @@ class GroundStationApp(QMainWindow):
         if state is SourceState.DISCONNECTED or state is SourceState.LINK_ERROR:
             self._telemetry_connected = False
         self.overview_page.health.set_source(state)
+        self.com_page.set_source_state(state)
 
     def _on_receiver_state(self, state: ReceiverState) -> None:
         self.overview_page.health.set_receiver(state)
@@ -256,7 +263,7 @@ class GroundStationApp(QMainWindow):
         # §4.5 — rejected packets are counted and visible, never
         # displayed as data. The count reaches the health strip via the
         # per-vehicle counters on the next accepted packet.
-        pass
+        self.com_page.on_rejected_line(rejected.reason.value, rejected.detail, rejected.raw)
 
     def _on_notice(self, text: str) -> None:
         self.statusBar().showMessage(text, 8000)
